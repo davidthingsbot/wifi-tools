@@ -1,77 +1,98 @@
-# Wi-Fi Troubleshooting — Review and Next Steps
+# Wi-Fi Troubleshooting — Findings and Fix
 
-*Prepared July 2, 2026 · A response to "Wi-Fi Performance Troubleshooting" (copy included alongside this report)*
+*Prepared July 2, 2026, updated the same evening · follows up on "Wi-Fi Performance Troubleshooting" (copy alongside this report)*
 
-First off: the investigation so far has been genuinely good. The near-router speed tests, the channel change, the rename-the-network experiment — those were the right instincts, and they ruled out a lot (the fiber, the router's raw speed, the devices themselves, and mostly the smart-home crowd). That's real progress, even when it doesn't feel like it.
+## The headline: we found it
 
-Having read through everything, I think the reason it's been so frustrating is simple: **this is two separate problems wearing one trench coat.** Every test so far has been aimed at both at once, so no single fix ever seemed to work.
+The thing that has been knocking devices off the Wi-Fi is a **Eufy security
+base station, running in "Experimental High Power" mode**. It operates its
+own hidden Wi-Fi network (that's how it talks to its cameras), and in that
+mode it transmits *loudly* — from the kitchen laptop's position it measured
+**-22 dBm, roughly a thousand times stronger than any neighbor's router**. It
+also transmits intermittently: quiet when the cameras are idle, blasting when
+they wake. A strong, bursty, in-house transmitter is precisely the profile of
+"the Wi-Fi randomly dies and then comes back."
 
-## The two problems
+It's now unplugged and the network is being re-measured. Early conclusion to
+hold loosely until the baseline confirms it — but the evidence is strong.
 
-### Problem 1: Weak signal in the far rooms (living room, deck, bedrooms)
+## How we caught it
 
-This one is almost certainly the house itself. A 1906 San Francisco house with lath-and-plaster walls is about the worst Wi-Fi environment there is — plaster of that era very often has **wire mesh backing**, which acts like a Faraday cage built into every wall. No channel change, setting tweak, or new router in the same spot will beat physics here.
+We wrote a small monitoring tool ([wifimon](https://github.com/davidthingsbot/wifi-tools))
+that runs on a laptop and records, every second, what the radio environment
+looks like. An 11-hour capture showed:
 
-The good news: the house has Ethernet jacks in the rooms, all running back to a central point. That's the cheat code. A wired access point in the front of the house fixes this properly and permanently. (More below — but let's confirm with measurements before spending money.)
+- **The laptop itself dropped off Wi-Fi 8 times in one day** — the same
+  symptom as the phone, now with a flight recorder attached.
+- **Every drop happened with a strong signal.** In the minute before each
+  drop, signal strength was fine, but 60–100% of transmitted frames were
+  having to be re-sent, and the laptop was missing 20–50% of the router's
+  "heartbeat" beacons. Missing heartbeats is exactly what makes a phone
+  decide the network is gone. In short: the signal was loud, and the air
+  was unusable — interference, not coverage.
+- **A mystery hidden network kept appearing and vanishing** — present in
+  only half the scans, absurdly strong, hardware ID belonging to a
+  smart-home manufacturer. A "fox hunt" mode (a big live signal readout —
+  walk around, the number grows as you get closer) led straight to the Eufy
+  base station.
 
-### Problem 2: The Wi-Fi icon disappearing for 5–10 seconds
+## What this explains — and what it doesn't
 
-This is the important one, and here's where I'd gently steer the investigation in a new direction. The previous summary's top theory was interference from the AT&T gateway's Wi-Fi (`Dionysus10`). Interference is real and worth cleaning up — but interference makes Wi-Fi **slow**, not **gone**. A phone on a congested channel will crawl along at 2 Mbps all day without ever dropping the icon. Something else is causing the actual disconnections.
+**Explains:** the random disconnects on both bands, the "signal bars look
+fine but nothing works" moments, the failure of every channel change to fix
+things (a transmitter that strong bleeds across channels), and why the
+problem seemed to come and go without pattern (it tracked the cameras'
+activity, not anything anyone did to the router).
 
-The icon vanishing and coming back on its own has a short list of likely causes, and notice that both observed drops happened in **weak-signal spots** (back deck, living room). That's a big clue. The leading suspects:
+**Doesn't explain:** the *slow speeds in the far rooms*. That is still the
+1906 walls — old plaster over wire mesh eats Wi-Fi — and it will still be
+true with the Eufy gone. The far rooms will drop less often now, but they
+won't get fast. The fix for that remains a **wired access point** in the
+front of the house, using the Ethernet already in the walls. Worth doing
+once the baseline is confirmed.
 
-1. **The iPhone is hopping between two saved networks.** The phone very likely still remembers `Dionysus10` from before the Synology existed. In the living room, where `Dionysus` is weak, the phone can decide to jump over to `Dionysus10` — and while iOS switches networks, the Wi-Fi icon disappears for several seconds. If the AT&T gateway hands out its own addresses, the switch also breaks whatever the phone was doing. This fits the symptom almost perfectly, and it's a 30-second check.
+## Confirming the fix
 
-2. **Smart Connect is shoving the phone around.** The Synology's Smart Connect moves devices between 2.4 GHz and 5 GHz, and the way it does that is blunt: it briefly kicks the device off so it reconnects on the other band. At the edge of coverage — exactly the living room and deck — it can get trigger-happy. That would produce short drops, on both bands, mostly in the far rooms. Which is exactly what's been observed.
+With the Eufy unplugged, leave the monitor running for a day. What "fixed"
+looks like:
 
-3. **iOS's "Private Wi-Fi Address" feature.** Newer iPhones can periodically *rotate* their Wi-Fi hardware address, which forces a brief reconnect. Also a 30-second check.
+- retransmission rate falling from ~67% to well under half that
+- beacon delivery climbing from ~79% into the 90s
+- zero laptop disconnects
+- and the real test: the phone's Wi-Fi icon stops vanishing
 
-Here's the encouraging part: these two problems feed each other. The weak signal in the front rooms is what *triggers* the network-hopping and the Smart Connect kicks. Fix the coverage, and the drops most likely go away too.
+## When the base station comes back
 
-## What to do next (cheap and easy first)
+It's presumably guarding something, so it can't stay unplugged forever.
+Before it returns:
 
-### Step 1 — On the iPhone (2 minutes, do this first)
+1. **Turn off Experimental High Power mode.** Normal mode exists for a
+   reason; the experimental setting is meant for cameras at the far end of
+   a large property, not a base station in the living space.
+2. **Check whether the Eufy app lets you pin its channel** — if so, put it
+   on whichever 2.4 GHz channel the Synology is *not* using.
+3. **Move it away from where people use their devices** — distance from the
+   base station matters as much as its power setting. If it has an Ethernet
+   port, wire it; that removes at least some of its radio traffic.
+4. Re-run the monitor for a day after it returns, and compare.
 
-- Settings → Wi-Fi → tap **Edit** (top right) to see saved networks. **Forget `Dionysus10`** and any other old networks from the house (old names, test networks, etc.).
-- Tap the ⓘ next to `Dionysus` → set **Private Wi-Fi Address** to **Fixed**.
-- Optional, just while testing: Settings → Cellular → scroll to the bottom → turn off **Wi-Fi Assist**.
+## Remaining to-do list (from the earlier report — still valid)
 
-### Step 2 — Turn off the AT&T gateway's Wi-Fi
+- **iPhone hygiene** (if not already done): forget `Dionysus10` and any old
+  saved networks; set Private Wi-Fi Address to "Fixed" for `Dionysus`.
+- **AT&T gateway Wi-Fi stays off** (it already appears to be off — good),
+  and confirm the gateway is in IP-Passthrough mode.
+- **Move the Synology's 5 GHz to channel 149** (80 MHz). The current
+  channel-40 block is shared with a strong neighboring mesh system;
+  149 is nearly empty here, allows higher transmit power, and avoids the
+  radar-shared channels that can cause their own disconnects.
+- **Wired access point for the front rooms** — the coverage fix, unchanged.
 
-The previous summary was right about this step — just for a slightly different reason. It cleans up the airwaves *and* removes `Dionysus10` as a place for the phone to escape to. While logged into the gateway, also check that it's in **IP Passthrough** mode (so the Synology is the one true router). Don't unplug the gateway itself — it's still needed for the fiber.
+## The moral of the story
 
-### Step 3 — When a drop happens, catch it in the act
-
-The Synology keeps a log. Right after the icon disappears, note the time, then later check **SRM → Network Center → Log** for entries around that moment. If it says the router *deauthenticated* the phone, that's Smart Connect doing it. If the phone just left, that points back at the phone. This single log line is the most valuable piece of evidence we don't have yet.
-
-### Step 4 — If drops continue: split the bands cleanly
-
-Turn Smart Connect off and give the two bands their own names (e.g. `Dionysus` and `Dionysus-5G`). Last time this was tried, old leftover settings ("New Highland") made a mess and 5 GHz refused to appear — that's a sign the router's wireless config has some cruft. If it misbehaves again, the fix is to reset just the Wi-Fi settings and set them up fresh (not a full factory reset). With the phone pinned to a single band, if the drops stop, we've found our culprit.
-
-### Step 5 — Measure the signal room by room, *then* buy hardware
-
-This is the one measurement the investigation hasn't taken yet, and it's the decider. Speed tests mix everything together; a signal reading separates the problems. On the Mac, hold **Option and click the Wi-Fi icon** in the menu bar — it shows an RSSI number (like -58). Walk to each trouble spot and write it down:
-
-| Location | RSSI (Option-click Wi-Fi icon) |
-|---|---|
-| Next to router | |
-| Kitchen | |
-| Living room | |
-| Back deck | |
-| Upstairs bedroom | |
-| Lower bedroom | |
-
-Rough guide: **-50s = great, -60s = fine, -70s = struggling, -80s = barely hanging on.** If the living room and deck read -70 or worse (likely, given the walls), then a **wired access point** using the existing Ethernet is the right fix — one AP near the front of the house, maybe a second upstairs. The Synology stays as the main router. (The WRX560 suggestion from before is a reasonable choice; there are cheaper options too. No need to decide until the numbers are in.)
-
-## A small tool to make this easier
-
-David is putting together a little logging script that can run on the Mac and quietly record the Wi-Fi signal, network name, and connection status once per second. Then the next time the icon vanishes, we'll have a black-box recording of exactly what happened in the seconds before — no more guessing. That's coming next.
-
-## The short version
-
-- The fiber, the router, and your devices are all fine. You proved that already.
-- The far rooms are slow because of the walls — old-house problem, and the Ethernet in the walls is the fix.
-- The dropouts are most likely the phone hopping to the old AT&T network, or the router shoving the phone between bands — both fixable with settings, and both easiest to trigger in exactly the rooms where the signal is weak.
-- Do the two-minute iPhone cleanup first, turn off the AT&T Wi-Fi, and grab the signal numbers when you get a chance. Those numbers will tell us the rest of the story.
-
-Nearly there. 🍷
+Everyone's original instincts — channels, router settings, too many smart
+devices — were reasonable, and testing them is what narrowed the field. The
+culprit turned out to be a smart-home device, just not by crowding the
+network: it was shouting over everyone with a setting labeled
+"experimental," on a network no one could see. The tools that found it are
+in the repo and ready for the next mystery. 🍷
