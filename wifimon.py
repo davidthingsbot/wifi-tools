@@ -13,10 +13,12 @@ Panels:
   * 5 GHz spectrum    — same for the 5 GHz band
   * Timeline (large)  — last N minutes, 1 column = 1 second:
         rssi    our link signal (dBm); red x = disconnected
-        lag     internet RTT (1 Hz pings to the gateway AND 1.1.1.1);
-                red ✕ = gateway unreachable while associated (the Wi-Fi
-                hop failed — the "bars lie" moment), magenta ✕ = gateway
-                fine but internet lost (problem is past the router)
+        gw      RTT of a 1 Hz ping to the router — the Wi-Fi hop in
+                isolation; red ✕ = gateway unreachable while associated
+                (the "bars lie" moment)
+        inet    RTT of a 1 Hz ping to 1.1.1.1 — the whole path;
+                magenta ✕ = gateway fine but internet lost (the problem
+                is past the router)
         retry%  tx retransmission rate — high = hostile air / contention
         beac%   beacon delivery rate — low = we're missing AP beacons
         busy%/noise shown instead when the driver provides survey data
@@ -773,42 +775,60 @@ def draw_timeline(win, history, color_map):
     have_busy = any(s["busy"] is not None for s in samples[-300:])
     have_noise = any(s["noise"] is not None for s in samples[-300:])
 
-    rows_rssi = max(3, int(avail * 0.35))
-    rest = avail - rows_rssi
-    rows_lag = max(2, int(rest * 0.4))
-    rows_a = max(2, (rest - rows_lag) // 2)
-    rows_b = rest - rows_lag - rows_a
-    y = 1
-    draw_chart(win, y, rows_rssi, samples, lambda s: s["rssi"],
-               RSSI_MIN, RSSI_MAX, color_map["rssi"], "rssi", "",
-               disconnect_attr=color_map["event"])
-    y += rows_rssi
-    # end-to-end truth: internet RTT; ✕ = ping lost. Red ✕ = the gateway
-    # itself was unreachable (the Wi-Fi hop failed while associated);
-    # magenta ✕ = gateway fine, internet not (problem is past the router).
-    def lag_bad(s):
+    # ✕ markers on the ping charts: red = the gateway itself was
+    # unreachable while associated (the Wi-Fi hop failed); magenta =
+    # gateway fine but internet not (problem is past the router).
+    def bad_gw(s):
+        return color_map["event"] if s.get("gw_loss") else None
+
+    def bad_inet(s):
         if s.get("gw_loss"):
             return color_map["event"]
         if s.get("inet_loss"):
             return color_map["noise"]
         return None
-    draw_chart(win, y, rows_lag, samples, lambda s: s["inet_ms"],
-               0, 500, color_map["lag"], "lag", "ms", bad=lag_bad)
-    y += rows_lag
-    draw_chart(win, y, rows_a, samples, lambda s: s["retry"],
-               0, 100, color_map["busy"], "retry%", "%")
-    y += rows_a
-    if rows_b >= 2:
+
+    def chart_aux(y, rows):
         if have_busy:
-            draw_chart(win, y, rows_b, samples, lambda s: s["busy"],
+            draw_chart(win, y, rows, samples, lambda s: s["busy"],
                        0, 100, color_map["busy"], "busy%", "%")
         elif have_noise:
-            draw_chart(win, y, rows_b, samples, lambda s: s["noise"],
+            draw_chart(win, y, rows, samples, lambda s: s["noise"],
                        NOISE_MIN, NOISE_MAX, color_map["noise"], "noise", "")
         else:
-            draw_chart(win, y, rows_b, samples, lambda s: s["beacon"],
+            draw_chart(win, y, rows, samples, lambda s: s["beacon"],
                        0, 100, color_map["noise"], "beac%", "%")
-        y += rows_b
+
+    # aux charts in display order; priority decides which survive when
+    # the terminal is short (1 = kept longest)
+    charts = [
+        (3, lambda y, r: draw_chart(       # the Wi-Fi hop, in isolation
+            win, y, r, samples, lambda s: s.get("gw_ms"),
+            0, 100, color_map["lag"], "gw", "ms", bad=bad_gw)),
+        (1, lambda y, r: draw_chart(       # the whole path
+            win, y, r, samples, lambda s: s.get("inet_ms"),
+            0, 500, color_map["lag"], "inet", "ms", bad=bad_inet)),
+        (2, lambda y, r: draw_chart(
+            win, y, r, samples, lambda s: s.get("retry"),
+            0, 100, color_map["busy"], "retry%", "%")),
+        (4, chart_aux),
+    ]
+    rows_rssi = max(3, int(avail * 0.3))
+    rest = avail - rows_rssi
+    n_aux = max(1, min(len(charts), rest // 2))
+    keep = sorted(p for p, _ in charts)[:n_aux]
+    selected = [fn for p, fn in charts if p in keep]
+
+    y = 1
+    draw_chart(win, y, rows_rssi, samples, lambda s: s["rssi"],
+               RSSI_MIN, RSSI_MAX, color_map["rssi"], "rssi", "",
+               disconnect_attr=color_map["event"])
+    y += rows_rssi
+    base, extra = divmod(rest, len(selected))
+    for i, fn in enumerate(selected):
+        r = base + (1 if i < extra else 0)
+        fn(y, r)
+        y += r
     # event marker row
     win.addnstr(y, 0, "event".rjust(GUTTER - 2) + " │", GUTTER, curses.A_DIM)
     for i, s in enumerate(samples):

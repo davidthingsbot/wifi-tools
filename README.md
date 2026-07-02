@@ -34,12 +34,16 @@ Panels:
   strongest signal, bottom row = AP count per channel (yellow when crowded).
 - **Timeline** (the main panel) — last N minutes, one column per second:
   - `rssi` — our link signal; red `x` = disconnected
-  - `lag` — end-to-end truth: 1 Hz pings to both the gateway and
-    1.1.1.1. The chart shows internet RTT; a red `✕` means the *gateway*
-    was unreachable while associated (the Wi-Fi hop failed — the moment
-    when the phone shows full bars but nothing works), a magenta `✕`
-    means the gateway answered but the internet didn't (the problem is
-    past the router — no channel change will fix it).
+  - `gw` — RTT of a 1 Hz ping to the router: the Wi-Fi hop measured in
+    isolation (0–100 ms scale). Healthy air is a few ms; swelling RTT
+    here is airtime congestion you feel before anything disconnects. A
+    red `✕` means the gateway didn't answer *while still associated* —
+    the moment when the phone shows full bars but nothing works.
+  - `inet` — RTT of a 1 Hz ping to 1.1.1.1: the whole path (0–500 ms
+    scale). A magenta `✕` means the gateway answered but the internet
+    didn't — the problem is past the router, and no channel change will
+    fix it. (Red `✕` here just mirrors a gateway loss: the root cause is
+    the Wi-Fi hop.)
   - `retry%` — tx retransmission rate (5 s window). High = hostile air:
     collisions, overlapping-channel interference, non-Wi-Fi noise.
   - `beac%` — beacons received vs expected. Beacons are the AP's 10 Hz
@@ -48,9 +52,10 @@ Panels:
     provides survey data (many laptop radios don't).
 
   Reading the stack top-to-bottom is reading the network stack itself:
-  radio (rssi) → air (retry/beacon) → link usability (gateway ping) →
-  the actual internet (1.1.1.1). Each layer can lie; the one below it
-  can't.
+  radio (rssi) → link usability (gw) → the actual internet (inet) →
+  the air itself (retry/beacon). On short terminals the less-critical
+  charts (gw, then beac%) are dropped first; maximize the window to see
+  all five.
 - **Events** — disconnects, reconnects, roams, RSSI drops ≥12 dB, retry
   storms, beacon loss, strong APs vanishing.
 
