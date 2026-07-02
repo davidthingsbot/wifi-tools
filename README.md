@@ -77,6 +77,46 @@ Notes learned the hard way (Intel iwlwifi):
   uses the union of the last two scans and AP-lost events require two
   consecutive misses.
 
+## wifimon-mac.py (for the Mac in the house)
+
+Same screen, same CSV files, adapted to what macOS allows. Getting
+started, in Terminal (Applications → Utilities → Terminal), from the
+wifi-tools folder:
+
+```
+python3 wifimon-mac.py --doctor
+```
+
+The doctor checks every data source and prints exact instructions for
+anything locked: what to `pip3 install` (optional), where to click in
+System Settings if macOS is hiding network names (Privacy & Security →
+Location Services → enable for Terminal, then reopen Terminal), and when
+`sudo` helps. **The tool runs regardless** — every missing permission
+just removes one nicety, and the startup banner says which.
+
+```
+python3 wifimon-mac.py                  # the monitor
+sudo python3 wifimon-mac.py             # richest link data
+python3 wifimon-mac.py --track "Name"   # fox hunt by network name or BSSID
+python3 wifimon-mac.py --debug-once     # one text sample to send back
+```
+
+Differences from the Linux version:
+
+- **`noise` chart is real** — Mac radios report the noise floor, which
+  Intel laptop radios don't. A nearby non-Wi-Fi transmitter shows up
+  here directly.
+- **No `retry%`/`beac%`** — Apple exposes no station counters. The
+  `rate` chart (negotiated tx rate) stands in: rate collapsing while
+  rssi holds steady means the radio is drowning in retries, and a
+  RATE COLLAPSE event fires.
+- **`gw`/`inet` ping charts: identical.** So are the CSVs —
+  `wifianalyze.py` reads Mac captures unchanged (its suspects table
+  automatically uses gateway RTT as the bad-air metric when retry% is
+  absent).
+- Scans are slower (macOS throttles them) and may show names as
+  `<hidden>` until Location Services is granted — `--doctor` explains.
+
 ## wifianalyze.py
 
 Scorecards and forensics for wifimon captures — turns the raw CSVs into a

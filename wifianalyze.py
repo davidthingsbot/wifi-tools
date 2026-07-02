@@ -121,11 +121,19 @@ def report_overview(cap):
           f"channels used: {', '.join(str(c) for c in chans)}")
     for col, label, unit in (("rssi_dbm", "rssi", " dBm"),
                              ("retry_pct", "retry", "%"),
-                             ("beacon_pct", "beacon", "%")):
+                             ("beacon_pct", "beacon", "%"),
+                             ("noise_dbm", "noise", " dBm"),
+                             ("gw_rtt_ms", "gw", " ms"),
+                             ("inet_rtt_ms", "inet", " ms")):
         vals = cap.floats(col)
         if vals:
             print(f"  {label:>6}: med={fnum(med(vals))}{unit}  "
                   f"p90={fnum(p90(vals))}{unit}  n={len(vals)}")
+    for col, label in (("gw_loss", "gateway ping losses"),
+                       ("inet_loss", "internet ping losses")):
+        n = sum(1 for r in cap.link if r.get(col) == "1")
+        if n:
+            print(f"  {label}: {n}s")
 
 
 def report_segments(cap):
@@ -194,14 +202,20 @@ def report_disconnects(cap):
                 dur = f"  (offline {parse_time(e2['time']) - t})"
                 break
         print(f"\n  DROP at {e['time'][11:19]}{dur}")
-        print(f"    {'t':>6}  {'rssi':>5}  {'retry%':>6}  {'beac%':>6}")
+        print(f"    {'t':>6}  {'rssi':>5}  {'retry%':>6}  {'beac%':>6}  "
+              f"{'gw ms':>6}  {'inet ms':>7}")
         for back in range(60, -1, -10):
             r = byt.get((t - timedelta(seconds=back))
                         .isoformat(timespec="seconds"))
             if r:
+                gw = ("LOST" if r.get("gw_loss") == "1"
+                      else r.get("gw_rtt_ms") or "--")
+                inet = ("LOST" if r.get("inet_loss") == "1"
+                        else r.get("inet_rtt_ms") or "--")
                 print(f"    -{back:>3d}s  {r.get('rssi_dbm') or '--':>5}  "
                       f"{r.get('retry_pct') or '--':>6}  "
-                      f"{r.get('beacon_pct') or '--':>6}")
+                      f"{r.get('beacon_pct') or '--':>6}  "
+                      f"{gw:>6}  {inet:>7}")
 
 
 def loudness(sig_max):
@@ -257,12 +271,17 @@ def report_suspects(cap, top, show_all=False):
                                          "ch": freq_to_channel(r["freq"]),
                                          "sig": []})
         m["sig"].append(float(r["signal_dbm"]))
-    # one retry number per minute (the median), so that a long capture
-    # doesn't count each second as independent evidence
+    # bad-air metric: retry% (Linux) or gateway RTT (macOS captures have
+    # no station counters; a struggling Wi-Fi hop inflates gw RTT the
+    # same way). One number per minute (the median), so a long capture
+    # doesn't count each second as independent evidence.
+    metric, mlabel = "retry_pct", "retry%"
+    if not any(r.get("retry_pct") for r in cap.link[:2000]):
+        metric, mlabel = "gw_rtt_ms", "gw ms"
     per_min = collections.defaultdict(list)
     for r in cap.link:
-        if r.get("retry_pct") and r["time"][:16] in scan_minutes:
-            per_min[r["time"][:16]].append(float(r["retry_pct"]))
+        if r.get(metric) and r["time"][:16] in scan_minutes:
+            per_min[r["time"][:16]].append(float(r[metric]))
     minute_retry = {mn: med(v) for mn, v in per_min.items()}
 
     rows = []
@@ -292,7 +311,7 @@ def report_suspects(cap, top, show_all=False):
 
     def emit(rs):
         print(f"  {'bssid':17} {'ssid':18} {'ch':>3} {'seen':>5} "
-              f"{'heard at':>13}  {'retry% on/off':>13} {'assoc':>6} {'conf':>5}")
+              f"{'heard at':>13}  {mlabel + ' on/off':>13} {'assoc':>6} {'conf':>5}")
         for r in rs:
             print(f"  {r['bssid']:17} {r['ssid']:18} {r['ch']:>3} "
                   f"{r['pres']:>4.0f}% {r['loud']:>8} {r['sig_max']:>4.0f}  "
