@@ -13,14 +13,17 @@ Panels:
   * 5 GHz spectrum    — same for the 5 GHz band
   * Timeline (large)  — last N minutes, 1 column = 1 second:
         rssi    our link signal (dBm); red x = disconnected
-        gw      RTT of a 1 Hz ping to the router — the Wi-Fi hop in
-                isolation; red ✕ = gateway unreachable while associated
-                (the "bars lie" moment)
-        inet    RTT of a 1 Hz ping to 1.1.1.1 — the whole path;
-                magenta ✕ = gateway fine but internet lost (the problem
-                is past the router)
-        retry%  tx retransmission rate — high = hostile air / contention
-        beac%   beacon delivery rate — low = we're missing AP beacons
+        router   RTT of a 1 Hz ping to the router — the Wi-Fi hop in
+                 isolation; red ✕ = router unreachable while associated
+                 (the "bars lie" moment)
+        internet RTT of a 1 Hz ping to 1.1.1.1 — the whole path;
+                 magenta ✕ = router fine but internet lost (the problem
+                 is past the router)
+        traffic  our own throughput (rx+tx Mb/s) — if latency/retries
+                 climb with it, congestion is self-inflicted; if they're
+                 bad while it's flat, blame the air
+        retry%   tx retransmission rate — high = hostile air / contention
+        beac%    beacon delivery rate — low = we're missing AP beacons
         busy%/noise shown instead when the driver provides survey data
   * Event log         — timestamped anomalies
 
@@ -281,6 +284,38 @@ class SurveyPoller:
         return result
 
 
+class TrafficPoller:
+    """1 Hz: our own throughput from the kernel byte counters — free to
+    read, no permissions. Separates self-inflicted congestion (lag rises
+    with our own load: bufferbloat) from ambient hostility (retries
+    while idle: neighbors / interferers)."""
+
+    def __init__(self, iface):
+        self.base = f"/sys/class/net/{iface}/statistics"
+        self._prev = None               # (time, rx_bytes, tx_bytes)
+
+    def _read(self, name):
+        try:
+            with open(os.path.join(self.base, name)) as f:
+                return int(f.read())
+        except (OSError, ValueError):
+            return None
+
+    def poll(self):
+        rx, tx = self._read("rx_bytes"), self._read("tx_bytes")
+        now = time.time()
+        prev = self._prev
+        self._prev = (now, rx, tx)
+        if rx is None or tx is None or prev is None or prev[1] is None:
+            return {}
+        dt = now - prev[0]
+        drx, dtx = rx - prev[1], tx - prev[2]
+        if dt <= 0 or drx < 0 or dtx < 0:   # interface bounced
+            return {}
+        return {"rx_mbps": round(drx * 8 / dt / 1e6, 2),
+                "tx_mbps": round(dtx * 8 / dt / 1e6, 2)}
+
+
 class Pinger(threading.Thread):
     """Persistent 1 Hz ping to one target; the end-to-end truth serum.
 
@@ -294,7 +329,7 @@ class Pinger(threading.Thread):
         self.target = target
         self.rtt = None
         self.last_reply = 0.0
-        self._proc_started = 0.0
+        self._proc_started = None       # None until the first ping launches
         self._proc = None
 
     def set_target(self, target):
@@ -332,7 +367,8 @@ class Pinger(threading.Thread):
         now = time.time()
         if now - self.last_reply <= 2.0:
             return "ok", self.rtt
-        if not self.target or now - self._proc_started < 3.0:
+        if (not self.target or self._proc_started is None
+                or now - self._proc_started < 3.0):
             return "warmup", None
         return "loss", None
 
@@ -435,7 +471,8 @@ class CsvLogs:
                               "beacon_loss", "rx_drop",
                               "noise_dbm", "busy_pct",
                               "gw_rtt_ms", "inet_rtt_ms",
-                              "gw_loss", "inet_loss"])
+                              "gw_loss", "inet_loss",
+                              "rx_mbps", "tx_mbps"])
         self.scan_w.writerow(["time", "bssid", "ssid", "freq", "chan", "signal_dbm"])
         self.event_w.writerow(["time", "event", "detail"])
 
@@ -456,6 +493,7 @@ class Monitor:
         self.scanner = Scanner(iface, scan_interval)
         self.ping_gw = Pinger()
         self.ping_inet = Pinger(INET_TARGET)
+        self.traffic = TrafficPoller(iface)
         self.logs = CsvLogs(logdir)
         self.history = collections.deque(maxlen=HISTORY_SECONDS)
         self.events = collections.deque(maxlen=400)
@@ -501,6 +539,8 @@ class Monitor:
             self._gw_refresh = time.time()
         gw_state, gw_ms = self.ping_gw.sample()
         inet_state, inet_ms = self.ping_inet.sample()
+        tput = self.traffic.poll()
+        rx_mbps, tx_mbps = tput.get("rx_mbps"), tput.get("tx_mbps")
         if not link.get("connected"):   # offline: losses are not news
             gw_state = inet_state = "warmup"
         gw_loss = gw_state == "loss"
@@ -593,6 +633,9 @@ class Monitor:
             "retry": retry, "beacon": beacon,
             "gw_ms": gw_ms, "inet_ms": inet_ms,
             "gw_loss": gw_loss, "inet_loss": inet_loss,
+            "rx_mbps": rx_mbps, "tx_mbps": tx_mbps,
+            "mbps": (rx_mbps + tx_mbps
+                     if rx_mbps is not None and tx_mbps is not None else None),
             "ssid": link.get("ssid"), "bssid": link.get("bssid"),
             "freq": link.get("freq"), "txrate": link.get("txrate"),
             "event": self.events[-1][1] if self.events and
@@ -610,7 +653,8 @@ class Monitor:
             nz(stat.get("tx_pkts")), nz(stat.get("tx_failed")),
             nz(stat.get("beacon_loss")), nz(stat.get("rx_drop")),
             nz(noise), nz(busy),
-            nz(gw_ms), nz(inet_ms), int(gw_loss), int(inet_loss)])
+            nz(gw_ms), nz(inet_ms), int(gw_loss), int(inet_loss),
+            nz(rx_mbps), nz(tx_mbps)])
         self.logs.flush()
         self.prev = link
         # display from the debounced union of the last two scans — raw
@@ -690,7 +734,7 @@ def draw_spectrum(win, title, aps, channels, own_bssid, color_own, color_other,
     win.noutrefresh()
 
 
-GUTTER = 12                             # left axis gutter width
+GUTTER = 15                             # left axis gutter width
 RIGHT = 7                               # right current-value column
 
 
@@ -802,16 +846,19 @@ def draw_timeline(win, history, color_map):
     # aux charts in display order; priority decides which survive when
     # the terminal is short (1 = kept longest)
     charts = [
-        (3, lambda y, r: draw_chart(       # the Wi-Fi hop, in isolation
+        (4, lambda y, r: draw_chart(       # the Wi-Fi hop, in isolation
             win, y, r, samples, lambda s: s.get("gw_ms"),
-            0, 100, color_map["lag"], "gw", "ms", bad=bad_gw)),
+            0, 100, color_map["lag"], "router", "ms", bad=bad_gw)),
         (1, lambda y, r: draw_chart(       # the whole path
             win, y, r, samples, lambda s: s.get("inet_ms"),
-            0, 500, color_map["lag"], "inet", "ms", bad=bad_inet)),
+            0, 500, color_map["lag"], "internet", "ms", bad=bad_inet)),
+        (3, lambda y, r: draw_chart(       # our own load on the air
+            win, y, r, samples, lambda s: s.get("mbps"),
+            0, 100, color_map["rssi"], "traffic", "Mb")),
         (2, lambda y, r: draw_chart(
             win, y, r, samples, lambda s: s.get("retry"),
             0, 100, color_map["busy"], "retry%", "%")),
-        (4, chart_aux),
+        (5, chart_aux),
     ]
     rows_rssi = max(3, int(avail * 0.3))
     rest = avail - rows_rssi
@@ -906,13 +953,15 @@ def main_screen(stdscr, mon, args):
                     inet_s = ("LOST" if sample["inet_loss"] else
                               f"{sample['inet_ms']:.0f}ms" if sample["inet_ms"]
                               is not None else "?")
+                    traf_s = (f"↓{sample['rx_mbps']:.1f} ↑{sample['tx_mbps']:.1f}"
+                              if sample["rx_mbps"] is not None else "?")
                     status = (f" {mon.iface}  {sample['ssid']}  "
                               f"ch {freq_to_channel(sample['freq'])} "
                               f"({sample['freq']} MHz)  "
                               f"rssi {sample['rssi']} dBm  "
-                              f"tx {sample['txrate'] or '?'} Mb/s  "
                               f"retry {retry_s}  beacons {beac_s}  "
-                              f"gw {gw_s}  inet {inet_s}")
+                              f"router {gw_s}  internet {inet_s}  "
+                              f"{traf_s} Mb/s")
                 else:
                     status = f" {mon.iface}  NOT CONNECTED"
                 age = time.time() - last_scan if last_scan else None
@@ -1134,8 +1183,9 @@ def headless(mon, seconds, report_every=15):
                   f"tx={f(sample['txrate'])} "
                   f"retry={f(sample['retry'], '{:.0f}%')} "
                   f"beac={f(sample['beacon'], '{:.0f}%')} "
-                  f"gw={'LOST' if sample['gw_loss'] else f(sample['gw_ms'], '{:.0f}ms')} "
-                  f"inet={'LOST' if sample['inet_loss'] else f(sample['inet_ms'], '{:.0f}ms')} "
+                  f"router={'LOST' if sample['gw_loss'] else f(sample['gw_ms'], '{:.0f}ms')} "
+                  f"internet={'LOST' if sample['inet_loss'] else f(sample['inet_ms'], '{:.0f}ms')} "
+                  f"traffic={f(sample['mbps'], '{:.1f}Mb')} "
                   f"aps={len(aps)} events={len(mon.events)}", flush=True)
         time.sleep(max(0.0, 1.0 - (time.time() - t0)))
     print(f"done: {n} samples, {len(mon.events)} events")

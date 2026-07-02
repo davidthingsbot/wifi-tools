@@ -34,16 +34,22 @@ Panels:
   strongest signal, bottom row = AP count per channel (yellow when crowded).
 - **Timeline** (the main panel) — last N minutes, one column per second:
   - `rssi` — our link signal; red `x` = disconnected
-  - `gw` — RTT of a 1 Hz ping to the router: the Wi-Fi hop measured in
-    isolation (0–100 ms scale). Healthy air is a few ms; swelling RTT
+  - `router` — RTT of a 1 Hz ping to the router: the Wi-Fi hop measured
+    in isolation (0–100 ms scale). Healthy air is a few ms; swelling RTT
     here is airtime congestion you feel before anything disconnects. A
-    red `✕` means the gateway didn't answer *while still associated* —
+    red `✕` means the router didn't answer *while still associated* —
     the moment when the phone shows full bars but nothing works.
-  - `inet` — RTT of a 1 Hz ping to 1.1.1.1: the whole path (0–500 ms
-    scale). A magenta `✕` means the gateway answered but the internet
+  - `internet` — RTT of a 1 Hz ping to 1.1.1.1: the whole path (0–500 ms
+    scale). A magenta `✕` means the router answered but the internet
     didn't — the problem is past the router, and no channel change will
-    fix it. (Red `✕` here just mirrors a gateway loss: the root cause is
+    fix it. (Red `✕` here just mirrors a router loss: the root cause is
     the Wi-Fi hop.)
+  - `traffic` — this machine's own throughput (rx+tx Mb/s) from the
+    kernel byte counters. The tell-apart chart: if `router` RTT and
+    retries climb whenever `traffic` does, the congestion is
+    self-inflicted (bufferbloat); if they're terrible while `traffic` is
+    flat, the air itself is hostile. `wifianalyze` bins this
+    automatically ("own traffic vs. air quality").
   - `retry%` — tx retransmission rate (5 s window). High = hostile air:
     collisions, overlapping-channel interference, non-Wi-Fi noise.
   - `beac%` — beacons received vs expected. Beacons are the AP's 10 Hz
@@ -52,10 +58,10 @@ Panels:
     provides survey data (many laptop radios don't).
 
   Reading the stack top-to-bottom is reading the network stack itself:
-  radio (rssi) → link usability (gw) → the actual internet (inet) →
-  the air itself (retry/beacon). On short terminals the less-critical
-  charts (gw, then beac%) are dropped first; maximize the window to see
-  all five.
+  radio (rssi) → link usability (router) → the actual internet →
+  our own load (traffic) → the air itself (retry/beacon). On short
+  terminals the less-critical charts are dropped first (beac%, then
+  router, then traffic); maximize the window to see all six.
 - **Events** — disconnects, reconnects, roams, RSSI drops ≥12 dB, retry
   storms, beacon loss, strong APs vanishing.
 
@@ -110,7 +116,7 @@ Differences from the Linux version:
   `rate` chart (negotiated tx rate) stands in: rate collapsing while
   rssi holds steady means the radio is drowning in retries, and a
   RATE COLLAPSE event fires.
-- **`gw`/`inet` ping charts: identical.** So are the CSVs —
+- **`router`/`internet` ping charts: identical.** So are the CSVs —
   `wifianalyze.py` reads Mac captures unchanged (its suspects table
   automatically uses gateway RTT as the bad-air metric when retry% is
   absent).

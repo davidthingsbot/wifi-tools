@@ -360,6 +360,40 @@ def report_suspects(cap, top, show_all=False):
     experiment, not to convict.""")
 
 
+def report_traffic(cap):
+    """Does our own load explain the pain? Bins every second by our own
+    throughput and shows what the air and the pings did in each bin."""
+    rows = [r for r in cap.link if r.get("rx_mbps") and r.get("tx_mbps")]
+    if not rows:
+        return                              # capture predates traffic column
+    section("own traffic vs. air quality (is the congestion self-inflicted?)")
+    bins = (("idle  (<1 Mb/s)", 0, 1), ("light (1-20)", 1, 20),
+            ("heavy (>20)", 20, 1e9))
+    print(f"  {'bin':16} {'time':>7}  {'retry%':>6}  {'router ms':>9}  "
+          f"{'internet ms':>11}")
+    emitted = 0
+    for label, lo, hi in bins:
+        sel = [r for r in rows
+               if lo <= float(r["rx_mbps"]) + float(r["tx_mbps"]) < hi]
+        if len(sel) < 30:
+            continue
+        emitted += 1
+        retry = med([float(r["retry_pct"]) for r in sel if r.get("retry_pct")])
+        gw = med([float(r["gw_rtt_ms"]) for r in sel if r.get("gw_rtt_ms")])
+        inet = med([float(r["inet_rtt_ms"]) for r in sel
+                    if r.get("inet_rtt_ms")])
+        print(f"  {label:16} {len(sel):>6}s  {fnum(retry):>6}  "
+              f"{fnum(gw):>9}  {fnum(inet):>11}")
+    if not emitted:
+        print("  (capture too short — each traffic level needs ≥30 s of "
+              "samples to say anything)")
+        return
+    print("  medians per bin. If retry/latency climb with your own traffic,"
+          " the congestion is\n  self-inflicted (bufferbloat, backhaul); if"
+          " they are bad even when idle, blame the\n  air — neighbors or"
+          " interferers.")
+
+
 def report_events(cap):
     section("event histogram")
     hist = collections.Counter(e["event"] for e in cap.events)
@@ -416,6 +450,7 @@ def main():
         report_segments(cap)
         report_hourly(cap)
         report_disconnects(cap)
+        report_traffic(cap)
         report_suspects(cap, args.suspects_top, args.suspects_all)
         report_events(cap)
     if len(caps) > 1:

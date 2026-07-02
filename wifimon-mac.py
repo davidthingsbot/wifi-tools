@@ -492,7 +492,8 @@ class MacMonitor:
             nz(sample["rssi"]), nz(sample["txrate"]), "", "",
             "", "", "", "",
             nz(noise), "",
-            nz(gw_ms), nz(inet_ms), int(gw_loss), int(inet_loss)])
+            nz(gw_ms), nz(inet_ms), int(gw_loss), int(inet_loss),
+            "", ""])
         self.logs.flush()
         self.prev = link
         return sample, (self.known_aps or aps), last_scan
@@ -611,10 +612,10 @@ def draw_timeline_mac(win, history, color_map):
     charts = [                             # (priority, draw)
         (2, lambda y, r: base.draw_chart(
             win, y, r, samples, lambda s: s.get("gw_ms"),
-            0, 100, color_map["lag"], "gw", "ms", bad=bad_gw)),
+            0, 100, color_map["lag"], "router", "ms", bad=bad_gw)),
         (1, lambda y, r: base.draw_chart(
             win, y, r, samples, lambda s: s.get("inet_ms"),
-            0, 500, color_map["lag"], "inet", "ms", bad=bad_inet)),
+            0, 500, color_map["lag"], "internet", "ms", bad=bad_inet)),
         (3, lambda y, r: base.draw_chart(
             win, y, r, samples, lambda s: s.get("txrate"),
             0, RATE_MAX, color_map["busy"], "rate", "Mb")),
@@ -699,7 +700,7 @@ def main_screen(stdscr, mon, args):
                               f"rssi {f(sample['rssi'])} dBm  "
                               f"noise {f(sample['noise'])} dBm  "
                               f"tx {f(sample['txrate'], '{:.0f}')} Mb/s  "
-                              f"gw {gw_s}  inet {inet_s}")
+                              f"router {gw_s}  internet {inet_s}")
                     if mon.link.redacted:
                         status += "  [names hidden: see --doctor]"
                 else:
@@ -755,8 +756,8 @@ def headless(mon, seconds, report_every=15):
                   f"conn={int(sample['connected'])} "
                   f"rssi={f(sample['rssi'])} noise={f(sample['noise'])} "
                   f"tx={f(sample['txrate'], '{:.0f}')} "
-                  f"gw={'LOST' if sample['gw_loss'] else f(sample['gw_ms'], '{:.0f}ms')} "
-                  f"inet={'LOST' if sample['inet_loss'] else f(sample['inet_ms'], '{:.0f}ms')} "
+                  f"router={'LOST' if sample['gw_loss'] else f(sample['gw_ms'], '{:.0f}ms')} "
+                  f"internet={'LOST' if sample['inet_loss'] else f(sample['inet_ms'], '{:.0f}ms')} "
                   f"aps={len(aps)} events={len(mon.events)}", flush=True)
         time.sleep(max(0.0, 1.0 - (time.time() - t0)))
     print(f"done: {n} samples, {len(mon.events)} events")
