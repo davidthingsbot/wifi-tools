@@ -74,11 +74,33 @@ report:
 
 Sections: overview (connectivity, channels, drop count), per-segment
 stats, hourly medians, **disconnect forensics** (the last 60 s of RSSI /
-retry% / beacon% before every drop), **suspects** (every intermittent AP
-ranked by how much worse the retry rate is while it is visible —
-annotated when an AP is too weak or too rarely seen to take seriously),
-and an event histogram. Run one capture per experiment (channel change,
-device unplugged, new location) and compare them side by side.
+retry% / beacon% before every drop), the **suspects table**, and an event
+histogram. Run one capture per experiment (channel change, device
+unplugged, new location) and compare them side by side.
+
+### Reading the suspects table
+
+For every AP that was sometimes-visible-sometimes-not, three independent
+questions, one column each:
+
+- **assoc** — *is bad air associated with this AP being around?* The
+  probability that a random minute with the AP visible has worse retry%
+  than a random minute without it (computed on per-minute medians).
+  50% = unrelated, 60% = mild, 75% = strong, 90%+ = near-lockstep.
+- **conf** — *could that be luck?* A Mann-Whitney z-score in sigmas,
+  driven by how many minutes of evidence exist on each side. <2σ is
+  shrug territory; ≥4σ is solid.
+- **heard at** — *is it physically capable of being the cause?* The
+  strongest beacon received, as a word (faint/weak/moderate/loud/
+  BLASTING) plus dBm.
+
+An AP is a **likely suspect** only when all three hold (assoc ≥60%,
+conf ≥2σ, heard at ≥ -72 dBm). One separate carve-out: anything heard at
+**-50 dBm or louder is listed regardless of correlation** ("extreme
+transmitters") — a bursty device like a camera base station can wreck
+the air while beaconing too rarely for presence-correlation to catch it,
+and something that loud is in the room with you either way. The table is
+for choosing the next unplug-and-measure experiment, not for convicting.
 
 ## Documents
 

@@ -25,9 +25,11 @@ Usage:
 """
 
 import argparse
+import bisect
 import collections
 import csv
 import glob
+import math
 import os
 import re
 import sys
@@ -202,7 +204,43 @@ def report_disconnects(cap):
                       f"{r.get('beacon_pct') or '--':>6}")
 
 
-def report_suspects(cap, top):
+def loudness(sig_max):
+    """How loud this AP gets at the capture position, in words."""
+    if sig_max >= -45:
+        return "BLASTING"
+    if sig_max >= -60:
+        return "loud"
+    if sig_max >= -72:
+        return "moderate"
+    if sig_max >= -82:
+        return "weak"
+    return "faint"
+
+
+def suspect_stats(on, off):
+    """Association strength + confidence between an AP's visibility and
+    bad air, computed on per-minute retry medians.
+
+    assoc = probability of superiority: the chance that a randomly chosen
+    visible-minute has worse retry% than a randomly chosen absent-minute.
+    50% = unrelated, 100% = visible-minutes are always worse.
+
+    conf = how unlikely this association is to be luck, given how many
+    minutes we observed (a Mann-Whitney z-score, reported in sigmas).
+    """
+    off_sorted = sorted(off)
+    wins = 0.0
+    for v in on:
+        lo = bisect.bisect_left(off_sorted, v)
+        hi = bisect.bisect_right(off_sorted, v)
+        wins += lo + (hi - lo) / 2.0
+    n1, n2 = len(on), len(off)
+    ps = wins / (n1 * n2)
+    z = (wins - n1 * n2 / 2.0) / math.sqrt(n1 * n2 * (n1 + n2 + 1) / 12.0)
+    return ps, z
+
+
+def report_suspects(cap, top, show_all=False):
     section("suspects — air quality vs. each intermittent AP's presence")
     if not cap.scan:
         print("  no scan data in this capture")
@@ -219,45 +257,88 @@ def report_suspects(cap, top):
                                          "ch": freq_to_channel(r["freq"]),
                                          "sig": []})
         m["sig"].append(float(r["signal_dbm"]))
-    # per-minute retry samples
-    minute_retry = collections.defaultdict(list)
+    # one retry number per minute (the median), so that a long capture
+    # doesn't count each second as independent evidence
+    per_min = collections.defaultdict(list)
     for r in cap.link:
         if r.get("retry_pct") and r["time"][:16] in scan_minutes:
-            minute_retry[r["time"][:16]].append(float(r["retry_pct"]))
+            per_min[r["time"][:16]].append(float(r["retry_pct"]))
+    minute_retry = {mn: med(v) for mn, v in per_min.items()}
 
     rows = []
     for bssid, minutes in seen.items():
-        on = [v for mn in minutes for v in minute_retry.get(mn, [])]
-        off = [v for mn in scan_minutes - minutes
-               for v in minute_retry.get(mn, [])]
-        pres = 100 * len(minutes) / len(scan_minutes)
-        if len(on) < 120 or len(off) < 120:
-            continue                      # need ≥2 min of samples each side
+        on = [minute_retry[mn] for mn in minutes if mn in minute_retry]
+        off = [minute_retry[mn] for mn in scan_minutes - minutes
+               if mn in minute_retry]
+        if len(on) < 10 or len(off) < 10:
+            continue                      # need ≥10 minutes on each side
+        ps, z = suspect_stats(on, off)
         m = meta[bssid]
+        sig_max = max(m["sig"])
         rows.append({
-            "bssid": bssid, "ssid": m["ssid"][:20], "ch": m["ch"],
-            "pres": pres, "sig_med": med(m["sig"]), "sig_max": max(m["sig"]),
-            "on": med(on), "off": med(off), "delta": med(on) - med(off),
+            "bssid": bssid, "ssid": m["ssid"][:18], "ch": m["ch"],
+            "pres": 100 * len(on) / (len(on) + len(off)),
+            "sig_med": med(m["sig"]), "sig_max": sig_max,
+            "loud": loudness(sig_max),
+            "on": med(on), "off": med(off),
+            "assoc": 100 * ps, "z": z,
+            "credible": (ps >= 0.60 and z >= 2.0 and sig_max >= -72),
         })
-    rows.sort(key=lambda r: r["delta"], reverse=True)
     if not rows:
         print("  no AP was intermittent enough to correlate "
-              "(need ≥2 min visible AND ≥2 min absent)")
+              "(need ≥10 minutes visible AND ≥10 minutes absent)")
         return
-    print(f"  {'bssid':17} {'ssid':20} {'ch':>3} {'seen':>5} "
-          f"{'sig med/max':>11}  {'retry% on/off':>13}  {'Δ':>4}")
-    for r in rows[:top]:
-        notes = []
-        if r["sig_max"] < -75:
-            notes.append("too weak to matter")
-        if r["pres"] < 5 or r["pres"] > 95:
-            notes.append("thin evidence")
-        note = f"  ({'; '.join(notes)})" if notes else ""
-        print(f"  {r['bssid']:17} {r['ssid']:20} {r['ch']:>3} "
-              f"{r['pres']:>4.0f}% {r['sig_med']:>5.0f}/{r['sig_max']:>4.0f}  "
-              f"{r['on']:>6.0f}/{r['off']:>5.0f}  {r['delta']:>+4.0f}{note}")
-    print("  Δ = median retry% while AP visible minus while absent. "
-          "Big positive Δ + strong signal + no caveat = suspect.")
+    rows.sort(key=lambda r: (not r["credible"], -r["assoc"]))
+
+    def emit(rs):
+        print(f"  {'bssid':17} {'ssid':18} {'ch':>3} {'seen':>5} "
+              f"{'heard at':>13}  {'retry% on/off':>13} {'assoc':>6} {'conf':>5}")
+        for r in rs:
+            print(f"  {r['bssid']:17} {r['ssid']:18} {r['ch']:>3} "
+                  f"{r['pres']:>4.0f}% {r['loud']:>8} {r['sig_max']:>4.0f}  "
+                  f"{r['on']:>6.0f}/{r['off']:>5.0f} {r['assoc']:>5.0f}% "
+                  f"{min(r['z'], 9.9):>4.1f}σ")
+
+    credible = [r for r in rows if r["credible"]]
+    # anything this loud is physically close to the capture position and
+    # worth investigating no matter what the correlation says — a bursty
+    # transmitter's *beacon visibility* badly understates its activity
+    extreme = [r for r in rows if r["sig_max"] >= -50 and not r["credible"]]
+    others = [r for r in rows if not r["credible"] and r not in extreme]
+    if credible:
+        print("  ── likely suspects (associated + confident + loud enough "
+              "to be physical) ──")
+        emit(credible[:top])
+    else:
+        print("  no credible suspects — nothing both audible and reliably "
+              "associated with bad air")
+    if extreme:
+        print("\n  ── extreme transmitters at this position — investigate "
+              "regardless of assoc ──")
+        emit(extreme[:top])
+    if others and (show_all or not credible):
+        print("\n  ── correlated but NOT credible (weak signal or could be "
+              "chance — context only) ──")
+        emit(others[:top if show_all else 3])
+    print("""
+  how to read this:
+    assoc  chance that a random minute with this AP visible has worse
+           retry% than a random minute without it. 50% = unrelated,
+           60% = mild, 75% = strong, 90%+ = near-lockstep.
+    conf   how unlikely that association is to be luck, in sigmas (σ),
+           given the number of minutes observed. <2σ could easily be
+           chance; ≥4σ is solid.
+    heard at  the AP's strongest beacon at this position (word + dBm). A
+           weak/faint AP is rarely the physical cause even when assoc is
+           high — that combination usually means shared timing (it and
+           the real interferer are both active in the evening). Its
+           clients might still be near you, so demote it, don't erase it.
+    A high number in ONE column means nothing; a suspect needs all three.
+    Exception: anything heard at -50 dBm or louder is *in the room with
+    you* and gets listed regardless — bursty devices (cameras, hubs) can
+    wreck the air while beaconing too rarely for assoc to catch them.
+    This is correlation: use it to pick the next unplug-and-measure
+    experiment, not to convict.""")
 
 
 def report_events(cap):
@@ -306,6 +387,8 @@ def main():
                     help="capture stamp(s) or CSV path(s); default = newest")
     ap.add_argument("--logdir", default="logs")
     ap.add_argument("--suspects-top", type=int, default=10)
+    ap.add_argument("--suspects-all", action="store_true",
+                    help="also list the non-credible correlations in full")
     args = ap.parse_args()
 
     caps = [Capture(s, args.logdir) for s in resolve_stamps(args)]
@@ -314,7 +397,7 @@ def main():
         report_segments(cap)
         report_hourly(cap)
         report_disconnects(cap)
-        report_suspects(cap, args.suspects_top)
+        report_suspects(cap, args.suspects_top, args.suspects_all)
         report_events(cap)
     if len(caps) > 1:
         report_comparison(caps)
