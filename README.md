@@ -123,6 +123,40 @@ Differences from the Linux version:
 - Scans are slower (macOS throttles them) and may show names as
   `<hidden>` until Location Services is granted — `--doctor` explains.
 
+## wificensus.py — who's using the air (monitor mode)
+
+`wifimon` measures *this machine's* link. `wificensus` measures
+**everyone's** — it puts the radio into monitor mode and passively sniffs
+one channel, then shows a live table of every transmitting device:
+airtime %, frame count, retry rate, bytes, signal, and the AP it's
+talking to. This is how you tell "the channel is congested because the
+AP's own clients are busy" from "something is jamming the air."
+
+```
+sudo ./wificensus.py --channel 11               # 2.4 GHz ch 11
+sudo ./wificensus.py --channel 149 --seconds 60 # 5 GHz, auto-stop
+```
+
+Keys: `q` quit, `s` cycle sort (airtime / frames / retries / signal).
+Sorted by airtime by default; devices over 20% airtime turn red (hogs).
+
+**Four things to know before running it:**
+
+1. **It drops this machine's Wi-Fi** while running — a single radio can't
+   be associated and sniffing at once. The connection restores on exit
+   (so don't run it over SSH-over-Wi-Fi). Run it in bursts.
+2. **It sees headers, not contents.** WPA2/WPA3 encrypts payloads. You
+   get who-talks-to-whom, sizes, retries, rates, and airtime — never
+   what's inside. That's all congestion diagnosis needs.
+3. **One channel at a time** — point `--channel` at the AP's channel.
+4. **Needs `sudo`** (monitor mode + raw socket). It tells you if not.
+
+Airtime is an estimate (frame bytes ÷ data rate), excellent for ranking
+who dominates the channel, not an exact duty cycle. Vendor names come
+from a local OUI database if one is installed (`ieee-data` /
+`wireshark-common`); otherwise the column is blank and you have the MAC.
+A per-station CSV snapshot is written to `logs/` every 5 s.
+
 ## wifianalyze.py
 
 Scorecards and forensics for wifimon captures — turns the raw CSVs into a
