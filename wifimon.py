@@ -309,6 +309,9 @@ class Scanner(threading.Thread):
                 continue
             bssid = m.group(1)
             ap = {"bssid": bssid, "seen": now}
+            m = re.search(r"last seen:\s*(\d+) ms ago", block)
+            if m:
+                ap["seen"] = now - int(m.group(1)) / 1000.0
             m = re.search(r"freq:\s*([\d.]+)", block)
             ap["freq"] = int(float(m.group(1))) if m else 0
             m = re.search(r"signal:\s*(-?[\d.]+)\s*dBm", block)
@@ -776,6 +779,166 @@ def main_screen(stdscr, mon, args):
         time.sleep(max(0.0, 1.0 - (time.time() - t0)))
 
 
+# ---------------------------------------------------------------- fox hunt
+
+BIGFONT = {
+    "0": ["████", "█  █", "█  █", "█  █", "████"],
+    "1": ["  █ ", " ██ ", "  █ ", "  █ ", " ███"],
+    "2": ["████", "   █", "████", "█   ", "████"],
+    "3": ["████", "   █", " ███", "   █", "████"],
+    "4": ["█  █", "█  █", "████", "   █", "   █"],
+    "5": ["████", "█   ", "████", "   █", "████"],
+    "6": ["████", "█   ", "████", "█  █", "████"],
+    "7": ["████", "   █", "  █ ", " █  ", " █  "],
+    "8": ["████", "█  █", "████", "█  █", "████"],
+    "9": ["████", "█  █", "████", "   █", "████"],
+    "-": ["    ", "    ", "████", "    ", "    "],
+    "?": ["████", "   █", "  ██", "    ", "  █ "],
+}
+
+
+def draw_big(win, y, x, text, attr):
+    """Render text in a 5-row block font, each pixel 2 columns wide."""
+    for row in range(5):
+        out = ""
+        for chq in text:
+            glyph = BIGFONT.get(chq, BIGFONT["?"])
+            out += "".join(c * 2 for c in glyph[row]) + "  "
+        try:
+            win.addstr(y + row, x, out, attr)
+        except curses.error:
+            pass
+
+
+def main_track(stdscr, mon, bssid, args):
+    """Fox-hunt display: one giant live RSSI readout for a single BSSID.
+    Walk toward where the number grows."""
+    curses.curs_set(0)
+    curses.use_default_colors()
+    stdscr.nodelay(True)
+    has_color = curses.has_colors()
+    if has_color:
+        curses.init_pair(1, curses.COLOR_GREEN, -1)
+        curses.init_pair(2, curses.COLOR_CYAN, -1)
+        curses.init_pair(3, curses.COLOR_YELLOW, -1)
+        curses.init_pair(4, curses.COLOR_RED, -1)
+    cp = (lambda n: curses.color_pair(n)) if has_color else (lambda n: 0)
+
+    history = collections.deque(maxlen=HISTORY_SECONDS)   # rssi or None, 1 Hz
+    best = None                     # (rssi, timestr)
+    last_reading = None             # (rssi, seen-time)
+
+    while True:
+        t0 = time.time()
+        mon.tick()                  # keeps CSV logging + events alive
+        aps, last_scan, _ = mon.scanner.snapshot()
+        ap = aps.get(bssid)
+
+        rssi = None
+        if ap and (time.time() - ap["seen"]) < max(8.0, 2 * mon.scanner.interval):
+            rssi = ap["signal"]
+            last_reading = (rssi, ap["seen"])
+            ts = datetime.now().strftime("%H:%M:%S")
+            if best is None or rssi > best[0]:
+                best = (rssi, ts)
+        history.append({"connected": True, "rssi": rssi})
+
+        ch = stdscr.getch()
+        if ch in (ord("q"), ord("Q")):
+            break
+        if ch in (ord("r"), ord("R")):
+            best = None
+
+        # warmer/colder: average of the last 3 readings vs the 3 before
+        valid = [s["rssi"] for s in history if s["rssi"] is not None]
+        guide, gattr = "· searching…", curses.A_DIM
+        if len(valid) >= 6:
+            recent = sum(valid[-3:]) / 3.0
+            before = sum(valid[-6:-3]) / 3.0
+            if recent - before >= 2:
+                guide, gattr = "▲▲ WARMER", cp(1) | curses.A_BOLD
+            elif before - recent >= 2:
+                guide, gattr = "▼▼ COLDER", cp(4) | curses.A_BOLD
+            else:
+                guide, gattr = "── steady", cp(3)
+
+        height, width = stdscr.getmaxyx()
+        stdscr.erase()
+        name = ap["ssid"] if ap else "?"
+        chan = freq_to_channel(ap["freq"]) if ap else "?"
+        band = band_of(ap["freq"]) if ap else "?"
+        stdscr.addnstr(0, 0,
+                       f" FOX HUNT  {bssid}  {name}  ch {chan} ({band} GHz)"
+                       f"  |  q quit  r reset best ".ljust(width - 1),
+                       width - 1, curses.A_REVERSE)
+
+        # the big number
+        if rssi is not None:
+            text, attr = f"{rssi:.0f}", cp(1) | curses.A_BOLD
+            note = "dBm (live)"
+        elif last_reading:
+            age = time.time() - last_reading[1]
+            text, attr = f"{last_reading[0]:.0f}", curses.A_DIM
+            note = f"dBm — NOT SEEN for {age:.0f}s (device may be idle)"
+        else:
+            text, attr = "?", curses.A_DIM
+            note = "no sighting yet"
+        x = max(0, (width - 10 * len(text)) // 2)
+        draw_big(stdscr, 2, x, text, attr)
+        stdscr.addnstr(8, max(0, (width - len(note)) // 2), note, width - 1,
+                       curses.A_DIM if rssi is None else 0)
+
+        # guidance + best
+        stdscr.addnstr(10, max(0, (width - len(guide)) // 2), guide,
+                       width - 1, gattr)
+        if best:
+            b = f"strongest so far: {best[0]:.0f} dBm at {best[1]}"
+            stdscr.addnstr(11, max(0, (width - len(b)) // 2), b, width - 1,
+                           curses.A_DIM)
+
+        # thermometer: -95 (far) … -20 (touching it)
+        t_y = 13
+        t_w = max(20, width - 16)
+        stdscr.addnstr(t_y, 2, "-95", 4, curses.A_DIM)
+        stdscr.addnstr(t_y, width - 5, "-20", 4, curses.A_DIM)
+        fill = scale(rssi if rssi is not None else
+                     (last_reading[0] if last_reading else None),
+                     -95, -20, t_w)
+        for i in range(t_w):
+            chq, attr2 = "░", curses.A_DIM
+            if fill is not None and i <= fill:
+                chq = "█"
+                attr2 = cp(1) if i < t_w * 0.6 else (cp(3) if i < t_w * 0.85
+                                                     else cp(4) | curses.A_BOLD)
+            try:
+                stdscr.addstr(t_y, 7 + i, chq, attr2)
+            except curses.error:
+                pass
+        if best:
+            bpos = scale(best[0], -95, -20, t_w)
+            if bpos is not None:
+                try:
+                    stdscr.addstr(t_y, 7 + bpos, "▲", cp(2) | curses.A_BOLD)
+                except curses.error:
+                    pass
+
+        # trend: one column per second
+        tl_h = height - 16
+        if tl_h >= 5:
+            wintl = curses.newwin(tl_h, width, 15, 0)
+            wintl.erase()
+            wintl.box()
+            wintl.addnstr(0, 2, " signal trend (1 col = 1 s; gaps = not seen) ",
+                          width - 4, curses.A_BOLD)
+            draw_chart(wintl, 1, tl_h - 2, list(history)[-(width - GUTTER - RIGHT):],
+                       lambda s: s["rssi"], RSSI_MIN, RSSI_MAX, cp(2),
+                       "rssi", "")
+            wintl.noutrefresh()
+        stdscr.noutrefresh()
+        curses.doupdate()
+        time.sleep(max(0.0, 1.0 - (time.time() - t0)))
+
+
 # ---------------------------------------------------------------- headless
 
 
@@ -831,6 +994,9 @@ def main():
     ap.add_argument("--logdir", default="logs", help="CSV output directory")
     ap.add_argument("--headless", type=float, metavar="SECONDS",
                     help="run without UI for SECONDS (logging only)")
+    ap.add_argument("--track", metavar="BSSID",
+                    help="fox-hunt mode: giant live signal readout for one "
+                         "BSSID — walk toward where the number grows")
     ap.add_argument("--debug-once", action="store_true",
                     help="print one text sample and exit (no UI)")
     args = ap.parse_args()
@@ -841,6 +1007,14 @@ def main():
     iface = args.iface or detect_iface()
     if not iface:
         sys.exit("no wireless interface found (try --iface)")
+
+    if args.track:
+        args.track = args.track.lower()
+        if not re.fullmatch(r"[0-9a-f:]{17}", args.track):
+            sys.exit(f"--track wants a BSSID like 10:2c:b1:69:64:ef, "
+                     f"got {args.track!r}")
+        if args.scan_interval == 10.0:
+            args.scan_interval = 3.0    # hunt wants the freshest data it can get
 
     mon = Monitor(iface, args.scan_interval, args.logdir)
     mon.start()
@@ -853,7 +1027,10 @@ def main():
         return
 
     try:
-        curses.wrapper(main_screen, mon, args)
+        if args.track:
+            curses.wrapper(main_track, mon, args.track, args)
+        else:
+            curses.wrapper(main_screen, mon, args)
     except KeyboardInterrupt:
         pass
     print(f"logs written to: {os.path.abspath(args.logdir)}/")

@@ -15,7 +15,18 @@ whether there was a corresponding RF-level event.
 ./wifimon.py                 # full-screen TUI (best in a maximized terminal)
 ./wifimon.py --headless 600  # log for 10 minutes, no UI
 ./wifimon.py --debug-once    # one text sample (sanity check / parsing test)
+./wifimon.py --track 10:2c:b1:69:64:ef   # fox-hunt mode (see below)
 ```
+
+### Fox-hunt mode (`--track BSSID`)
+
+For physically locating a transmitter. Shows one giant live signal
+readout for a single BSSID, a WARMER/COLDER indicator, a distance
+thermometer, and the best-so-far marker. Walk the house; the number grows
+as you approach the device. Scans run at 3 s cadence in this mode, and a
+"NOT SEEN for Ns" state distinguishes *device idle* (it stopped beaconing)
+from *getting colder* — important for intermittent gadgets. `r` resets
+the best-so-far, `q` quits. Logging continues as usual.
 
 Panels:
 
@@ -49,6 +60,25 @@ Notes learned the hard way (Intel iwlwifi):
 - Scan results from NetworkManager's cache are often partial; the display
   uses the union of the last two scans and AP-lost events require two
   consecutive misses.
+
+## wifianalyze.py
+
+Scorecards and forensics for wifimon captures — turns the raw CSVs into a
+report:
+
+```
+./wifianalyze.py                   # newest capture in ./logs
+./wifianalyze.py 20260702-074007   # a specific capture (by stamp)
+./wifianalyze.py A B C             # several captures -> comparison table
+```
+
+Sections: overview (connectivity, channels, drop count), per-segment
+stats, hourly medians, **disconnect forensics** (the last 60 s of RSSI /
+retry% / beacon% before every drop), **suspects** (every intermittent AP
+ranked by how much worse the retry rate is while it is visible —
+annotated when an AP is too weak or too rarely seen to take seriously),
+and an event histogram. Run one capture per experiment (channel change,
+device unplugged, new location) and compare them side by side.
 
 ## Documents
 
