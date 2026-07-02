@@ -794,7 +794,8 @@ def draw_chart(win, y0, rows, samples, getter, lo, hi, attr,
         except curses.error:
             pass
     if last_val is not None:
-        cur = f"{last_val:.0f}{unit}"
+        prec = 1 if 0 < abs(last_val) < 10 else 0
+        cur = f"{last_val:.{prec}f}{unit}"
         win.addnstr(y0, w - RIGHT, cur.rjust(RIGHT - 1), RIGHT - 1,
                     curses.A_BOLD)
     return
@@ -854,7 +855,7 @@ def draw_timeline(win, history, color_map):
             0, 500, color_map["lag"], "internet", "ms", bad=bad_inet)),
         (3, lambda y, r: draw_chart(       # our own load on the air
             win, y, r, samples, lambda s: s.get("mbps"),
-            0, 100, color_map["rssi"], "traffic", "Mb")),
+            0, 30, color_map["rssi"], "traffic", "Mb")),
         (2, lambda y, r: draw_chart(
             win, y, r, samples, lambda s: s.get("retry"),
             0, 100, color_map["busy"], "retry%", "%")),
