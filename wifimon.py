@@ -13,6 +13,10 @@ Panels:
   * 5 GHz spectrum    — same for the 5 GHz band
   * Timeline (large)  — last N minutes, 1 column = 1 second:
         rssi    our link signal (dBm); red x = disconnected
+        lag     internet RTT (1 Hz pings to the gateway AND 1.1.1.1);
+                red ✕ = gateway unreachable while associated (the Wi-Fi
+                hop failed — the "bars lie" moment), magenta ✕ = gateway
+                fine but internet lost (problem is past the router)
         retry%  tx retransmission rate — high = hostile air / contention
         beac%   beacon delivery rate — low = we're missing AP beacons
         busy%/noise shown instead when the driver provides survey data
@@ -65,6 +69,12 @@ EVT_BUSY = "AIRTIME"
 EVT_RETRY = "RETRY STORM"
 EVT_BEACON = "BEACON LOSS"
 EVT_AP_LOST = "AP LOST"
+EVT_STALL = "LINK STALL"               # associated but gateway unreachable
+EVT_INET = "INET LOSS"                 # gateway fine, internet not
+EVT_LAG = "LAG"                        # internet reachable but very slow
+
+INET_TARGET = "1.1.1.1"
+LAG_EVENT_MS = 400                      # sustained RTT above this = event
 
 # ---------------------------------------------------------------- helpers
 
@@ -269,6 +279,74 @@ class SurveyPoller:
         return result
 
 
+class Pinger(threading.Thread):
+    """Persistent 1 Hz ping to one target; the end-to-end truth serum.
+
+    Runs a single long-lived `ping` process and parses replies as they
+    arrive. sample() classifies the current second as ok (with RTT),
+    warmup (just started / no target yet), or loss.
+    """
+
+    def __init__(self, target=None):
+        super().__init__(daemon=True)
+        self.target = target
+        self.rtt = None
+        self.last_reply = 0.0
+        self._proc_started = 0.0
+        self._proc = None
+
+    def set_target(self, target):
+        if target != self.target:
+            self.target = target
+            if self._proc:
+                self._proc.kill()       # reader loop restarts with new target
+
+    def run(self):
+        while True:
+            target = self.target
+            if not target:
+                time.sleep(1)
+                continue
+            try:
+                self._proc = subprocess.Popen(
+                    ["ping", "-n", "-i", "1", "-W", "2", target],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    text=True)
+            except OSError:
+                time.sleep(5)
+                continue
+            self._proc_started = time.time()
+            for line in self._proc.stdout:
+                if target != self.target:
+                    break
+                m = re.search(r"time=([\d.]+)\s*ms", line)
+                if m:
+                    self.rtt = float(m.group(1))
+                    self.last_reply = time.time()
+            self._proc.kill()
+            time.sleep(2)               # then restart (network may be back)
+
+    def sample(self):
+        now = time.time()
+        if now - self.last_reply <= 2.0:
+            return "ok", self.rtt
+        if not self.target or now - self._proc_started < 3.0:
+            return "warmup", None
+        return "loss", None
+
+
+def default_gateway(iface):
+    out = run(["ip", "route", "show", "default"])
+    best = None
+    for line in out.splitlines():
+        m = re.search(r"default via (\S+) dev (\S+)", line)
+        if m:
+            if m.group(2) == iface:
+                return m.group(1)
+            best = best or m.group(1)
+    return best
+
+
 class Scanner(threading.Thread):
     """Background AP scanner. Direct nl80211 scan when root, otherwise asks
     NetworkManager to rescan and reads the cached results."""
@@ -353,7 +431,9 @@ class CsvLogs:
                               "rssi_dbm", "txrate_mbps", "retry_pct",
                               "beacon_pct", "tx_pkts", "tx_failed",
                               "beacon_loss", "rx_drop",
-                              "noise_dbm", "busy_pct"])
+                              "noise_dbm", "busy_pct",
+                              "gw_rtt_ms", "inet_rtt_ms",
+                              "gw_loss", "inet_loss"])
         self.scan_w.writerow(["time", "bssid", "ssid", "freq", "chan", "signal_dbm"])
         self.event_w.writerow(["time", "event", "detail"])
 
@@ -372,15 +452,23 @@ class Monitor:
         self.station = StationPoller(iface)
         self.survey = SurveyPoller(iface)
         self.scanner = Scanner(iface, scan_interval)
+        self.ping_gw = Pinger()
+        self.ping_inet = Pinger(INET_TARGET)
         self.logs = CsvLogs(logdir)
         self.history = collections.deque(maxlen=HISTORY_SECONDS)
         self.events = collections.deque(maxlen=400)
         self.prev = {}                  # previous link sample
         self.rssi_window = collections.deque(maxlen=6)
         self.known_aps = {}             # bssid -> last ap dict (for AP-lost)
+        self._gw_bad = 0                # consecutive seconds of gateway loss
+        self._inet_bad = 0
+        self._lag_high = 0
+        self._gw_refresh = 0
 
     def start(self):
         self.scanner.start()
+        self.ping_gw.start()
+        self.ping_inet.start()
 
     def event(self, kind, detail=""):
         ts = datetime.now()
@@ -404,6 +492,21 @@ class Monitor:
         busy = cur.get("busy_pct")
         retry = stat.get("retry_pct")
         beacon = stat.get("beacon_pct")
+
+        # ---- end-to-end probes (gateway + internet)
+        if link.get("connected") and time.time() - self._gw_refresh > 10:
+            self.ping_gw.set_target(default_gateway(self.iface))
+            self._gw_refresh = time.time()
+        gw_state, gw_ms = self.ping_gw.sample()
+        inet_state, inet_ms = self.ping_inet.sample()
+        if not link.get("connected"):   # offline: losses are not news
+            gw_state = inet_state = "warmup"
+        gw_loss = gw_state == "loss"
+        inet_loss = inet_state == "loss"
+        self._gw_bad = self._gw_bad + 1 if gw_loss else 0
+        self._inet_bad = self._inet_bad + 1 if inet_loss else 0
+        self._lag_high = self._lag_high + 1 if (
+            inet_ms is not None and inet_ms > LAG_EVENT_MS) else 0
 
         # ---- event detection
         was = self.prev
@@ -438,6 +541,16 @@ class Monitor:
             if not self._recent_event(EVT_BEACON, 30):
                 self.event(EVT_BEACON,
                            f"driver reported beacon loss x{stat['beacon_loss']}")
+        if self._gw_bad == 3 and not self._recent_event(EVT_STALL, 30):
+            self.event(EVT_STALL,
+                       f"associated (rssi {link.get('rssi')}) but gateway "
+                       f"unreachable — the 'bars lie' moment")
+        if (self._inet_bad == 5 and not gw_loss
+                and not self._recent_event(EVT_INET, 30)):
+            self.event(EVT_INET, "gateway fine but internet unreachable "
+                       "(problem is past the router)")
+        if self._lag_high == 5 and not self._recent_event(EVT_LAG, 30):
+            self.event(EVT_LAG, f"internet RTT {inet_ms:.0f} ms sustained")
         if noise is not None and noise > -80:
             if not self._recent_event(EVT_NOISE, 30):
                 self.event(EVT_NOISE, f"noise floor {noise} dBm")
@@ -476,6 +589,8 @@ class Monitor:
             "ts": now, "connected": link.get("connected", False),
             "rssi": link.get("rssi"), "noise": noise, "busy": busy,
             "retry": retry, "beacon": beacon,
+            "gw_ms": gw_ms, "inet_ms": inet_ms,
+            "gw_loss": gw_loss, "inet_loss": inet_loss,
             "ssid": link.get("ssid"), "bssid": link.get("bssid"),
             "freq": link.get("freq"), "txrate": link.get("txrate"),
             "event": self.events[-1][1] if self.events and
@@ -492,7 +607,8 @@ class Monitor:
             nz(sample["rssi"]), nz(sample["txrate"]), nz(retry), nz(beacon),
             nz(stat.get("tx_pkts")), nz(stat.get("tx_failed")),
             nz(stat.get("beacon_loss")), nz(stat.get("rx_drop")),
-            nz(noise), nz(busy)])
+            nz(noise), nz(busy),
+            nz(gw_ms), nz(inet_ms), int(gw_loss), int(inet_loss)])
         self.logs.flush()
         self.prev = link
         # display from the debounced union of the last two scans — raw
@@ -577,8 +693,14 @@ RIGHT = 7                               # right current-value column
 
 
 def draw_chart(win, y0, rows, samples, getter, lo, hi, attr,
-               label, unit, disconnect_attr=None):
-    """A multi-row column chart: one terminal column per sample."""
+               label, unit, disconnect_attr=None, bad=None):
+    """A multi-row column chart: one terminal column per sample.
+
+    bad: optional callable(sample) -> None when the second was fine, or a
+    curses attr to draw a full-height ✕ column marker in (so different
+    failure causes can get different colors). Visually distinct from
+    "no data" (blank).
+    """
     h, w = win.getmaxyx()
     x0 = GUTTER
     n = min(len(samples), w - GUTTER - RIGHT)
@@ -595,13 +717,22 @@ def draw_chart(win, y0, rows, samples, getter, lo, hi, attr,
     last_val = None
     for i, s in enumerate(samples):
         x = x0 + i
-        v = getter(s)
         if disconnect_attr is not None and not s["connected"]:
             try:
                 win.addstr(y0 + rows - 1, x, "x", disconnect_attr | curses.A_BOLD)
             except curses.error:
                 pass
             continue
+        battr = bad(s) if bad is not None else None
+        if battr is not None:
+            try:
+                win.addstr(y0, x, "✕", battr | curses.A_BOLD)
+                for r in range(1, rows):
+                    win.addstr(y0 + r, x, "│", battr)
+            except curses.error:
+                pass
+            continue
+        v = getter(s)
         if v is None:
             continue
         last_val = v
@@ -642,15 +773,28 @@ def draw_timeline(win, history, color_map):
     have_busy = any(s["busy"] is not None for s in samples[-300:])
     have_noise = any(s["noise"] is not None for s in samples[-300:])
 
-    rows_rssi = max(4, int(avail * 0.5))
+    rows_rssi = max(3, int(avail * 0.35))
     rest = avail - rows_rssi
-    rows_a = max(2, rest // 2)
-    rows_b = rest - rows_a
+    rows_lag = max(2, int(rest * 0.4))
+    rows_a = max(2, (rest - rows_lag) // 2)
+    rows_b = rest - rows_lag - rows_a
     y = 1
     draw_chart(win, y, rows_rssi, samples, lambda s: s["rssi"],
                RSSI_MIN, RSSI_MAX, color_map["rssi"], "rssi", "",
                disconnect_attr=color_map["event"])
     y += rows_rssi
+    # end-to-end truth: internet RTT; ✕ = ping lost. Red ✕ = the gateway
+    # itself was unreachable (the Wi-Fi hop failed while associated);
+    # magenta ✕ = gateway fine, internet not (problem is past the router).
+    def lag_bad(s):
+        if s.get("gw_loss"):
+            return color_map["event"]
+        if s.get("inet_loss"):
+            return color_map["noise"]
+        return None
+    draw_chart(win, y, rows_lag, samples, lambda s: s["inet_ms"],
+               0, 500, color_map["lag"], "lag", "ms", bad=lag_bad)
+    y += rows_lag
     draw_chart(win, y, rows_a, samples, lambda s: s["retry"],
                0, 100, color_map["busy"], "retry%", "%")
     y += rows_a
@@ -704,7 +848,8 @@ def main_screen(stdscr, mon, args):
         curses.init_pair(4, curses.COLOR_RED, -1)     # events
         curses.init_pair(5, curses.COLOR_MAGENTA, -1) # noise / beacons
     cp = (lambda n: curses.color_pair(n)) if has_color else (lambda n: 0)
-    color_map = {"rssi": cp(1), "noise": cp(5), "busy": cp(3), "event": cp(4)}
+    color_map = {"rssi": cp(1), "noise": cp(5), "busy": cp(3),
+                 "event": cp(4), "lag": cp(2)}
 
     paused = False
     chans_24 = list(range(1, 14))
@@ -735,12 +880,19 @@ def main_screen(stdscr, mon, args):
                                if sample["retry"] is not None else "?")
                     beac_s = (f"{sample['beacon']:.0f}%"
                               if sample["beacon"] is not None else "?")
-                    status = (f" {mon.iface}  {sample['ssid']}  {sample['bssid']}  "
+                    gw_s = ("LOST" if sample["gw_loss"] else
+                            f"{sample['gw_ms']:.0f}ms" if sample["gw_ms"]
+                            is not None else "?")
+                    inet_s = ("LOST" if sample["inet_loss"] else
+                              f"{sample['inet_ms']:.0f}ms" if sample["inet_ms"]
+                              is not None else "?")
+                    status = (f" {mon.iface}  {sample['ssid']}  "
                               f"ch {freq_to_channel(sample['freq'])} "
                               f"({sample['freq']} MHz)  "
                               f"rssi {sample['rssi']} dBm  "
                               f"tx {sample['txrate'] or '?'} Mb/s  "
-                              f"retry {retry_s}  beacons {beac_s}")
+                              f"retry {retry_s}  beacons {beac_s}  "
+                              f"gw {gw_s}  inet {inet_s}")
                 else:
                     status = f" {mon.iface}  NOT CONNECTED"
                 age = time.time() - last_scan if last_scan else None
@@ -962,8 +1114,8 @@ def headless(mon, seconds, report_every=15):
                   f"tx={f(sample['txrate'])} "
                   f"retry={f(sample['retry'], '{:.0f}%')} "
                   f"beac={f(sample['beacon'], '{:.0f}%')} "
-                  f"busy={f(sample['busy'], '{:.0f}%')} "
-                  f"noise={f(sample['noise'])} "
+                  f"gw={'LOST' if sample['gw_loss'] else f(sample['gw_ms'], '{:.0f}ms')} "
+                  f"inet={'LOST' if sample['inet_loss'] else f(sample['inet_ms'], '{:.0f}ms')} "
                   f"aps={len(aps)} events={len(mon.events)}", flush=True)
         time.sleep(max(0.0, 1.0 - (time.time() - t0)))
     print(f"done: {n} samples, {len(mon.events)} events")

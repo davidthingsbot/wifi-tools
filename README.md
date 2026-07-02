@@ -34,12 +34,23 @@ Panels:
   strongest signal, bottom row = AP count per channel (yellow when crowded).
 - **Timeline** (the main panel) — last N minutes, one column per second:
   - `rssi` — our link signal; red `x` = disconnected
+  - `lag` — end-to-end truth: 1 Hz pings to both the gateway and
+    1.1.1.1. The chart shows internet RTT; a red `✕` means the *gateway*
+    was unreachable while associated (the Wi-Fi hop failed — the moment
+    when the phone shows full bars but nothing works), a magenta `✕`
+    means the gateway answered but the internet didn't (the problem is
+    past the router — no channel change will fix it).
   - `retry%` — tx retransmission rate (5 s window). High = hostile air:
     collisions, overlapping-channel interference, non-Wi-Fi noise.
   - `beac%` — beacons received vs expected. Beacons are the AP's 10 Hz
     heartbeat; missing them is what makes clients give up and disconnect.
   - `busy%` / `noise` replace `beac%` automatically when the driver
     provides survey data (many laptop radios don't).
+
+  Reading the stack top-to-bottom is reading the network stack itself:
+  radio (rssi) → air (retry/beacon) → link usability (gateway ping) →
+  the actual internet (1.1.1.1). Each layer can lie; the one below it
+  can't.
 - **Events** — disconnects, reconnects, roams, RSSI drops ≥12 dB, retry
   storms, beacon loss, strong APs vanishing.
 
