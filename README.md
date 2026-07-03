@@ -56,9 +56,10 @@ Panels:
     band (`2.4`/`5`/`6`) and channel are written out (a few columns =
     a few seconds) then a continuation rule runs until the next change,
     colored per band. Makes band/channel hops — mesh roaming between
-    nodes — obvious at a glance. When you've been on more than one mesh
-    node, the node id (`#2`) is appended after the band so you can see
-    *which* AP; with a single AP it's omitted.
+    nodes — obvious at a glance. As soon as a mesh is known (more than
+    one node broadcasting the SSID), the node id (`#1`, `#2`) is appended
+    after the band so you always know *which* AP you're on — even before
+    you roam. With a single AP it's omitted (nothing to disambiguate).
   - `router` — RTT of a 1 Hz ping to the router: the Wi-Fi hop measured
     in isolation (0–100 ms scale). Healthy air is a few ms; swelling RTT
     here is airtime congestion you feel before anything disconnects. A

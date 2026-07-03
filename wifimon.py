@@ -512,6 +512,15 @@ class NodeMap:
         v = self.nodes.get(k) if k else None
         return v["name"] if v else None
 
+    def is_mesh(self, ssid=None):
+        """True when more than one physical node is known — for the given
+        SSID if provided, otherwise for any SSID. When it is a mesh, the
+        node id is worth showing even before you roam."""
+        counts = collections.Counter(v.get("ssid") for v in self.nodes.values())
+        if ssid and ssid in counts:
+            return counts[ssid] > 1
+        return any(c > 1 for c in counts.values())
+
 
 # ---------------------------------------------------------------- logging
 
@@ -920,20 +929,23 @@ def draw_chart(win, y0, rows, samples, getter, lo, hi, attr,
     return
 
 
-def draw_band_channel(win, y0, rows, samples, color_map):
+def draw_band_channel(win, y0, rows, samples, color_map, multi_node=None):
     """A band/channel track in two rows: at each change the band is
     written on the top row and the channel on the bottom row; the bottom
     row then continues with a rule (───) until the next change. Colored
     per band, so band/channel hops (mesh roaming) pop out at a glance.
-      row0  band  (2.4 / 5 / 6), plus "#n" mesh node when more than one
-            node has been seen (disambiguation only)
+      row0  band  (2.4 / 5 / 6), plus "#n" mesh node when a mesh exists
+            (so you always know which AP you're on)
       row1  channel number, then a continuation rule until the next change
+
+    multi_node: whether to show the "#n" node id. Pass True when a mesh
+    is known (>1 node); None falls back to "did we roam in this window".
     """
     win.addnstr(y0, 0, "band".rjust(GUTTER - 2) + " │", GUTTER, curses.A_DIM)
     win.addnstr(y0 + 1, 0, "chan".rjust(GUTTER - 2) + " │", GUTTER,
                 curses.A_DIM)
-    # show the node id only when the client actually moved between nodes
-    multi_node = len({s.get("node") for s in samples if s.get("node")}) > 1
+    if multi_node is None:
+        multi_node = len({s.get("node") for s in samples if s.get("node")}) > 1
 
     def keyof(s):
         if not s["connected"] or not s.get("freq"):
@@ -970,7 +982,7 @@ def draw_band_channel(win, y0, rows, samples, color_map):
         prev = k
 
 
-def draw_timeline(win, history, color_map):
+def draw_timeline(win, history, color_map, multi_node=None):
     """The main panel: stacked multi-row charts, 1 column = 1 second."""
     h, w = win.getmaxyx()
     win.erase()
@@ -1048,7 +1060,7 @@ def draw_timeline(win, history, color_map):
                attr_of=lambda s: band_color(s.get("freq"), color_map))
     y += rows_rssi
     if rows_lane:
-        draw_band_channel(win, y, rows_lane, samples, color_map)
+        draw_band_channel(win, y, rows_lane, samples, color_map, multi_node)
         y += rows_lane
     base, extra = divmod(rest, len(selected))
     for i, fn in enumerate(selected):
@@ -1174,7 +1186,8 @@ def main_screen(stdscr, mon, args):
                               chans_5, sample.get("bssid"),
                               b5 | curses.A_BOLD, b5 | curses.A_DIM, cp(3))
                 wintl = curses.newwin(tl_h, width, 1 + spec_h, 0)
-                draw_timeline(wintl, mon.history, color_map)
+                draw_timeline(wintl, mon.history, color_map,
+                              mon.nodemap.is_mesh(sample.get("ssid")))
                 if ev_h >= 3:
                     winev = curses.newwin(ev_h, width, 1 + spec_h + tl_h, 0)
                     draw_events(winev, mon.events)

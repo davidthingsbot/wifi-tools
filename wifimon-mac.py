@@ -670,7 +670,7 @@ def doctor(iface):
 # ---------------------------------------------------------------- UI
 
 
-def draw_timeline_mac(win, history, color_map):
+def draw_timeline_mac(win, history, color_map, multi_node=None):
     h, w = win.getmaxyx()
     win.erase()
     win.box()
@@ -730,7 +730,8 @@ def draw_timeline_mac(win, history, color_map):
                     attr_of=lambda s: base.band_color(s.get("freq"), color_map))
     y += rows_rssi
     if rows_lane:
-        base.draw_band_channel(win, y, rows_lane, samples, color_map)
+        base.draw_band_channel(win, y, rows_lane, samples, color_map,
+                               multi_node)
         y += rows_lane
     per, extra = divmod(rest, len(selected))
     for i, fn in enumerate(selected):
@@ -837,7 +838,8 @@ def main_screen(stdscr, mon, args):
                                    b5 | curses.A_BOLD, b5 | curses.A_DIM,
                                    cp(3))
                 wintl = curses.newwin(tl_h, width, 1 + spec_h, 0)
-                draw_timeline_mac(wintl, mon.history, color_map)
+                draw_timeline_mac(wintl, mon.history, color_map,
+                                  mon.nodemap.is_mesh(sample.get("ssid")))
                 if ev_h >= 3:
                     winev = curses.newwin(ev_h, width, 1 + spec_h + tl_h, 0)
                     base.draw_events(winev, mon.events)
