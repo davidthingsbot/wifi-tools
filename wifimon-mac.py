@@ -824,14 +824,18 @@ def main_screen(stdscr, mon, args):
                                  reverse=True)
                 w24 = [a for a in ap_list if base.band_of(a["freq"]) == "2.4"]
                 w5 = [a for a in ap_list if base.band_of(a["freq"]) == "5"]
+                b24 = color_map["band"].get("2.4") or cp(1)
+                b5 = color_map["band"].get("5") or cp(1)
                 win24 = curses.newwin(spec_h, half, 1, 0)
                 base.draw_spectrum(win24, f"2.4 GHz — {len(w24)} APs", w24,
                                    chans_24, sample.get("bssid"),
-                                   cp(1) | curses.A_BOLD, cp(2), cp(3))
+                                   b24 | curses.A_BOLD, b24 | curses.A_DIM,
+                                   cp(3))
                 win5 = curses.newwin(spec_h, width - half, 1, half)
                 base.draw_spectrum(win5, f"5 GHz — {len(w5)} APs", w5,
                                    chans_5, sample.get("bssid"),
-                                   cp(1) | curses.A_BOLD, cp(2), cp(3))
+                                   b5 | curses.A_BOLD, b5 | curses.A_DIM,
+                                   cp(3))
                 wintl = curses.newwin(tl_h, width, 1 + spec_h, 0)
                 draw_timeline_mac(wintl, mon.history, color_map)
                 if ev_h >= 3:

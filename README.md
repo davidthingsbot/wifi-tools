@@ -44,7 +44,9 @@ the best-so-far, `q` quits. Logging continues as usual.
 Panels:
 
 - **2.4 GHz / 5 GHz spectrum** — every visible AP by channel; bar height =
-  strongest signal, bottom row = AP count per channel (yellow when crowded).
+  strongest signal, bottom row = AP count per channel (yellow when
+  crowded). Bars use the band palette (2.4 orange, 5 blue) matching the
+  timeline; the AP you're connected to is bold, the rest dimmed.
 - **Timeline** (the main panel) — last N minutes, one column per second:
   - `rssi` — our link signal; red `x` = disconnected. The bars are
     tinted by band (2.4=orange, 5=blue, 6=purple — vivid, distinct
@@ -54,7 +56,9 @@ Panels:
     band (`2.4`/`5`/`6`) and channel are written out (a few columns =
     a few seconds) then a continuation rule runs until the next change,
     colored per band. Makes band/channel hops — mesh roaming between
-    nodes — obvious at a glance.
+    nodes — obvious at a glance. When you've been on more than one mesh
+    node, the node id (`#2`) is appended after the band so you can see
+    *which* AP; with a single AP it's omitted.
   - `router` — RTT of a 1 Hz ping to the router: the Wi-Fi hop measured
     in isolation (0–100 ms scale). Healthy air is a few ms; swelling RTT
     here is airtime congestion you feel before anything disconnects. A

@@ -925,17 +925,21 @@ def draw_band_channel(win, y0, rows, samples, color_map):
     written on the top row and the channel on the bottom row; the bottom
     row then continues with a rule (───) until the next change. Colored
     per band, so band/channel hops (mesh roaming) pop out at a glance.
-      row0  band  (2.4 / 5 / 6), written at each change
+      row0  band  (2.4 / 5 / 6), plus "#n" mesh node when more than one
+            node has been seen (disambiguation only)
       row1  channel number, then a continuation rule until the next change
     """
     win.addnstr(y0, 0, "band".rjust(GUTTER - 2) + " │", GUTTER, curses.A_DIM)
     win.addnstr(y0 + 1, 0, "chan".rjust(GUTTER - 2) + " │", GUTTER,
                 curses.A_DIM)
+    # show the node id only when the client actually moved between nodes
+    multi_node = len({s.get("node") for s in samples if s.get("node")}) > 1
 
     def keyof(s):
         if not s["connected"] or not s.get("freq"):
             return None
-        return (band_of(s["freq"]), freq_to_channel(s["freq"]))
+        node = s.get("node") if multi_node else None
+        return (band_of(s["freq"]), freq_to_channel(s["freq"]), node)
 
     def put(y, x, ch, attr):
         try:
@@ -951,10 +955,11 @@ def draw_band_channel(win, y0, rows, samples, color_map):
         if k is None:
             prev = None
             continue
-        band, chan = k
+        band, chan, node = k
         attr = band_color(s["freq"], color_map) or 0
         if k != prev:                    # segment start: write both labels
-            for j, c in enumerate(band):
+            top = band + (f" {node}" if node else "")
+            for j, c in enumerate(top):
                 put(y0, x + j, c, attr | curses.A_BOLD)
             cs = str(chan)
             for j, c in enumerate(cs):
@@ -1156,14 +1161,18 @@ def main_screen(stdscr, mon, args):
                 w24 = [a for a in ap_list if band_of(a["freq"]) == "2.4"]
                 w5 = [a for a in ap_list if band_of(a["freq"]) == "5"]
 
+                # spectrum bars use the band palette too (2.4=orange,
+                # 5=blue), matching the timeline; own AP is bold, others dim
+                b24 = color_map["band"].get("2.4") or cp(1)
+                b5 = color_map["band"].get("5") or cp(1)
                 win24 = curses.newwin(spec_h, half, 1, 0)
                 draw_spectrum(win24, f"2.4 GHz — {len(w24)} APs", w24,
                               chans_24, sample.get("bssid"),
-                              cp(1) | curses.A_BOLD, cp(2), cp(3))
+                              b24 | curses.A_BOLD, b24 | curses.A_DIM, cp(3))
                 win5 = curses.newwin(spec_h, width - half, 1, half)
                 draw_spectrum(win5, f"5 GHz — {len(w5)} APs", w5,
                               chans_5, sample.get("bssid"),
-                              cp(1) | curses.A_BOLD, cp(2), cp(3))
+                              b5 | curses.A_BOLD, b5 | curses.A_DIM, cp(3))
                 wintl = curses.newwin(tl_h, width, 1 + spec_h, 0)
                 draw_timeline(wintl, mon.history, color_map)
                 if ev_h >= 3:
