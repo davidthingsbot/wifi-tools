@@ -18,6 +18,19 @@ whether there was a corresponding RF-level event.
 ./wifimon.py --track 10:2c:b1:69:64:ef   # fox-hunt mode (see below)
 ```
 
+### Mesh: which node am I on?
+
+With multiple access points broadcasting one SSID (e.g. Synology WiFi
+Point mesh), wifimon groups BSSIDs into physical nodes — radios of one
+box share their first five MAC octets — and names them `#1`, `#2`, ...
+The connected node shows in the status line (`Dionysus #2`), and roam
+events name both ends (`ROAM #1 ch 11 -> #2 ch 149`). The mapping lives
+in `ap-nodes.json`; edit the `"name"` values to rename nodes (`"attic"`,
+`"hall"`) and the new names appear everywhere, including wifianalyze's
+segments table. Note: traceroute can NOT tell nodes apart — mesh points
+are layer-2 bridges, so every packet takes the same path; the BSSID is
+the only ground truth.
+
 ### Fox-hunt mode (`--track BSSID`)
 
 For physically locating a transmitter. Shows one giant live signal
