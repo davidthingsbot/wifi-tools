@@ -13,6 +13,10 @@ Panels:
   * 5 GHz spectrum    — same for the 5 GHz band
   * Timeline (large)  — last N minutes, 1 column = 1 second:
         rssi    our link signal (dBm); red x = disconnected
+        band/chan  which band + channel we're on; the label is written
+                at each change (a few seconds) then a continuation rule
+                runs until the next change — makes band/channel hops
+                (mesh roaming) obvious. Colored per band.
         router   RTT of a 1 Hz ping to the router — the Wi-Fi hop in
                  isolation; red ✕ = router unreachable while associated
                  (the "bars lie" moment)
@@ -879,6 +883,56 @@ def draw_chart(win, y0, rows, samples, getter, lo, hi, attr,
     return
 
 
+def draw_band_channel(win, y0, rows, samples, color_map):
+    """A band/channel track: at each change the band and channel are
+    written out (a few columns each = a few seconds), then a continuation
+    rule runs until the next change. Colored per band. Uses 4 rows:
+      row0  band  (2.4 / 5 / 6)
+      row1  channel number
+      row2  continuation rule (├───────) colored by band
+      row3  breathing space / separator
+    """
+    band_attr = {"2.4": color_map["busy"],    # yellow — the crowded band
+                 "5": color_map["lag"],        # cyan
+                 "6": color_map["noise"]}      # magenta
+    win.addnstr(y0, 0, "band".rjust(GUTTER - 2) + " │", GUTTER, curses.A_DIM)
+    win.addnstr(y0 + 1, 0, "chan".rjust(GUTTER - 2) + " │", GUTTER,
+                curses.A_DIM)
+    if rows >= 3:
+        win.addnstr(y0 + 2, GUTTER - 2, " │", 2, curses.A_DIM)
+
+    def keyof(s):
+        if not s["connected"] or not s.get("freq"):
+            return None
+        return (band_of(s["freq"]), freq_to_channel(s["freq"]))
+
+    def put(y, x, ch, attr):
+        try:
+            win.addstr(y, x, ch, attr)
+        except curses.error:
+            pass
+
+    prev = None
+    for i, s in enumerate(samples):
+        x = GUTTER + i
+        k = keyof(s)
+        if k is None:
+            prev = None
+            continue
+        band, chan = k
+        attr = band_attr.get(band, 0)
+        if k != prev:                    # segment start: label + tick
+            for j, c in enumerate(band):
+                put(y0, x + j, c, attr | curses.A_BOLD)
+            for j, c in enumerate(str(chan)):
+                put(y0 + 1, x + j, c, attr | curses.A_BOLD)
+            if rows >= 3:
+                put(y0 + 2, x, "├", attr)
+        elif rows >= 3:                  # continuation rule
+            put(y0 + 2, x, "─", attr)
+        prev = k
+
+
 def draw_timeline(win, history, color_map):
     """The main panel: stacked multi-row charts, 1 column = 1 second."""
     h, w = win.getmaxyx()
@@ -939,8 +993,13 @@ def draw_timeline(win, history, color_map):
             0, 100, color_map["busy"], "retry%", "%")),
         (5, chart_aux),
     ]
-    rows_rssi = max(3, int(avail * 0.3))
-    rest = avail - rows_rssi
+    # rssi + a 4-row band/channel lane share the top ~30%; the lane is
+    # carved out of rssi's height (only when there's room to spare)
+    LANE = 4
+    rows_top = max(3, int(avail * 0.3))
+    rows_lane = LANE if rows_top >= 3 + LANE else 0
+    rows_rssi = rows_top - rows_lane
+    rest = avail - rows_top
     n_aux = max(1, min(len(charts), rest // 2))
     keep = sorted(p for p, _ in charts)[:n_aux]
     selected = [fn for p, fn in charts if p in keep]
@@ -950,6 +1009,9 @@ def draw_timeline(win, history, color_map):
                RSSI_MIN, RSSI_MAX, color_map["rssi"], "rssi", "",
                disconnect_attr=color_map["event"])
     y += rows_rssi
+    if rows_lane:
+        draw_band_channel(win, y, rows_lane, samples, color_map)
+        y += rows_lane
     base, extra = divmod(rest, len(selected))
     for i, fn in enumerate(selected):
         r = base + (1 if i < extra else 0)

@@ -47,6 +47,11 @@ Panels:
   strongest signal, bottom row = AP count per channel (yellow when crowded).
 - **Timeline** (the main panel) — last N minutes, one column per second:
   - `rssi` — our link signal; red `x` = disconnected
+  - `band`/`chan` — which band and channel we're on. At each change the
+    band (`2.4`/`5`/`6`) and channel are written out (a few columns =
+    a few seconds) then a continuation rule runs until the next change,
+    colored per band. Makes band/channel hops — mesh roaming between
+    nodes — obvious at a glance.
   - `router` — RTT of a 1 Hz ping to the router: the Wi-Fi hop measured
     in isolation (0–100 ms scale). Healthy air is a few ms; swelling RTT
     here is airtime congestion you feel before anything disconnects. A

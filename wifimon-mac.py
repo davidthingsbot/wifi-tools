@@ -712,8 +712,13 @@ def draw_timeline_mac(win, history, color_map):
             base.NOISE_MIN, base.NOISE_MAX, color_map["noise"],
             "noise", "")),
     ]
-    rows_rssi = max(3, int(avail * 0.3))
-    rest = avail - rows_rssi
+    # rssi + a 4-row band/channel lane share the top; the lane is carved
+    # out of rssi's height (only when there's room to spare)
+    LANE = 4
+    rows_top = max(3, int(avail * 0.3))
+    rows_lane = LANE if rows_top >= 3 + LANE else 0
+    rows_rssi = rows_top - rows_lane
+    rest = avail - rows_top
     n_aux = max(1, min(len(charts), rest // 2))
     keep = sorted(p for p, _ in charts)[:n_aux]
     selected = [fn for p, fn in charts if p in keep]
@@ -723,6 +728,9 @@ def draw_timeline_mac(win, history, color_map):
                     base.RSSI_MIN, base.RSSI_MAX, color_map["rssi"],
                     "rssi", "", disconnect_attr=color_map["event"])
     y += rows_rssi
+    if rows_lane:
+        base.draw_band_channel(win, y, rows_lane, samples, color_map)
+        y += rows_lane
     per, extra = divmod(rest, len(selected))
     for i, fn in enumerate(selected):
         r = per + (1 if i < extra else 0)
