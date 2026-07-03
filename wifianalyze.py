@@ -29,11 +29,33 @@ import bisect
 import collections
 import csv
 import glob
+import json
 import math
 import os
 import re
 import sys
 from datetime import datetime, timedelta
+
+
+def load_nodes():
+    """Node names from wifimon's ap-nodes.json (see NodeMap in wifimon.py)."""
+    try:
+        with open("ap-nodes.json") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def node_label(bssid, nodes):
+    if not bssid or not nodes:
+        return ""
+    try:
+        parts = bssid.lower().split(":")
+        key = f"{int(parts[0], 16) & ~0x02:02x}:" + ":".join(parts[1:5])
+    except (ValueError, IndexError):
+        return ""
+    v = nodes.get(key)
+    return v["name"] if v else ""
 
 
 def freq_to_channel(freq):
@@ -138,14 +160,15 @@ def report_overview(cap):
 
 def report_segments(cap):
     section("segments (contiguous BSSID+channel stretches)")
+    nodes = load_nodes()
     segs = []
     for r in cap.link:
         key = (r["bssid"], r["freq"])
         if not segs or segs[-1]["key"] != key:
             segs.append({"key": key, "rows": []})
         segs[-1]["rows"].append(r)
-    print(f"  {'start':>8} {'end':>8}  {'bssid':17} {'ch':>3} {'n':>6}  "
-          f"{'rssi':>10}  {'retry%':>11}  {'beac%':>11}")
+    print(f"  {'start':>8} {'end':>8}  {'bssid':17} {'node':4} {'ch':>3} "
+          f"{'n':>6}  {'rssi':>10}  {'retry%':>11}  {'beac%':>11}")
     for s in segs:
         rs = s["rows"]
         bssid, freq = s["key"]
@@ -157,8 +180,8 @@ def report_segments(cap):
         beac = [float(r["beacon_pct"]) for r in rs if r.get("beacon_pct")]
         label = bssid or "(disconnected)"
         print(f"  {rs[0]['time'][11:19]:>8} {rs[-1]['time'][11:19]:>8}  "
-              f"{label:17} {ch!s:>3} {len(rs):>6}  "
-              f"med {fnum(med(rssi)):>4}   "
+              f"{label:17} {node_label(bssid, nodes):4} {ch!s:>3} "
+              f"{len(rs):>6}  med {fnum(med(rssi)):>4}   "
               f"med {fnum(med(retry)):>3} p90 {fnum(p90(retry)):>3}   "
               f"med {fnum(med(beac)):>3} p90 {fnum(p90(beac)):>3}")
 

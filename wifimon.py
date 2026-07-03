@@ -45,6 +45,7 @@ import argparse
 import collections
 import csv
 import curses
+import json
 import os
 import re
 import shutil
@@ -449,6 +450,63 @@ class Scanner(threading.Thread):
             return dict(self.aps), self.last_scan, fresh
 
 
+# ---------------------------------------------------------------- nodes
+
+
+class NodeMap:
+    """Groups BSSIDs into physical access points ("nodes") and gives them
+    stable friendly names: #1, #2, ...
+
+    In a mesh (e.g. Synology WiFi Point), every node broadcasts the same
+    SSID but each node's each radio has its own BSSID — and the radios of
+    one physical box share the first five MAC octets. That prefix is the
+    grouping key.
+
+    The mapping persists in ap-nodes.json next to the tool. Edit the
+    "name" values there to rename nodes (e.g. "#2" -> "attic") — the
+    names appear in the status line, roam events, and wifianalyze.
+    """
+
+    def __init__(self, path="ap-nodes.json"):
+        self.path = path
+        self.nodes = {}                 # key -> {"name","ssid","seen_bssid"}
+        try:
+            with open(path) as f:
+                self.nodes = json.load(f)
+        except (OSError, ValueError):
+            self.nodes = {}
+
+    @staticmethod
+    def key(bssid):
+        try:
+            parts = bssid.lower().split(":")
+            first = int(parts[0], 16) & ~0x02   # ignore locally-admin bit
+            return f"{first:02x}:" + ":".join(parts[1:5])
+        except (ValueError, IndexError, AttributeError):
+            return None
+
+    def register(self, bssid, ssid):
+        k = self.key(bssid)
+        if not k or not ssid:
+            return None
+        if k not in self.nodes:
+            n = sum(1 for v in self.nodes.values()
+                    if v.get("ssid") == ssid) + 1
+            self.nodes[k] = {"name": f"#{n}", "ssid": ssid,
+                             "seen_bssid": bssid}
+            try:
+                with open(self.path, "w") as f:
+                    json.dump(self.nodes, f, indent=1)
+            except OSError:
+                pass
+        return self.nodes[k]["name"]
+
+    def label(self, bssid):
+        k = self.key(bssid) if bssid else None
+        v = self.nodes.get(k) if k else None
+        return v["name"] if v else None
+
+
 # ---------------------------------------------------------------- logging
 
 
@@ -494,6 +552,7 @@ class Monitor:
         self.ping_gw = Pinger()
         self.ping_inet = Pinger(INET_TARGET)
         self.traffic = TrafficPoller(iface)
+        self.nodemap = NodeMap()
         self.logs = CsvLogs(logdir)
         self.history = collections.deque(maxlen=HISTORY_SECONDS)
         self.events = collections.deque(maxlen=400)
@@ -551,18 +610,30 @@ class Monitor:
             inet_ms is not None and inet_ms > LAG_EVENT_MS) else 0
 
         # ---- event detection
+        if link.get("connected"):
+            self.nodemap.register(link.get("bssid"), link.get("ssid"))
+
+        def node_of(lnk):
+            return self.nodemap.label(lnk.get("bssid")) or "?"
+
         was = self.prev
         if was:
             if was.get("connected") and not link["connected"]:
-                self.event(EVT_DISCONNECT, f"lost {was.get('ssid')} ({was.get('bssid')})")
+                self.event(EVT_DISCONNECT,
+                           f"lost {was.get('ssid')} {node_of(was)} "
+                           f"({was.get('bssid')})")
             elif not was.get("connected") and link["connected"]:
-                self.event(EVT_RECONNECT, f"{link.get('ssid')} ch {freq_to_channel(link.get('freq', 0))}")
+                self.event(EVT_RECONNECT,
+                           f"{link.get('ssid')} {node_of(link)} ch "
+                           f"{freq_to_channel(link.get('freq', 0))}")
             elif (link.get("connected") and was.get("bssid")
                   and link.get("bssid") != was.get("bssid")):
                 self.event(EVT_ROAM,
-                           f"{was.get('bssid')} -> {link.get('bssid')} "
-                           f"(ch {freq_to_channel(was.get('freq', 0))} -> "
-                           f"{freq_to_channel(link.get('freq', 0))})")
+                           f"{node_of(was)} ch "
+                           f"{freq_to_channel(was.get('freq', 0))} -> "
+                           f"{node_of(link)} ch "
+                           f"{freq_to_channel(link.get('freq', 0))} "
+                           f"({was.get('bssid')} -> {link.get('bssid')})")
         if link.get("rssi") is not None:
             self.rssi_window.append(link["rssi"])
             if (len(self.rssi_window) == self.rssi_window.maxlen
@@ -602,6 +673,11 @@ class Monitor:
 
         # ---- scan bookkeeping (AP appearance/disappearance)
         aps, last_scan, fresh = self.scanner.snapshot()
+        if fresh and link.get("ssid"):
+            # every AP broadcasting our SSID is one of our mesh nodes
+            for ap in aps.values():
+                if ap["ssid"] == link["ssid"]:
+                    self.nodemap.register(ap["bssid"], link["ssid"])
         if fresh:
             for bssid, ap in aps.items():
                 self.logs.scan_w.writerow([now.isoformat(timespec="seconds"),
@@ -629,6 +705,8 @@ class Monitor:
         # ---- history + logs
         sample = {
             "ts": now, "connected": link.get("connected", False),
+            "node": (self.nodemap.label(link.get("bssid"))
+                     if link.get("connected") else None),
             "rssi": link.get("rssi"), "noise": noise, "busy": busy,
             "retry": retry, "beacon": beacon,
             "gw_ms": gw_ms, "inet_ms": inet_ms,
@@ -956,9 +1034,10 @@ def main_screen(stdscr, mon, args):
                               is not None else "?")
                     traf_s = (f"↓{sample['rx_mbps']:.1f} ↑{sample['tx_mbps']:.1f}"
                               if sample["rx_mbps"] is not None else "?")
-                    status = (f" {mon.iface}  {sample['ssid']}  "
+                    node_s = f" {sample['node']}" if sample["node"] else ""
+                    status = (f" {mon.iface}  {sample['ssid']}{node_s}  "
                               f"ch {freq_to_channel(sample['freq'])} "
-                              f"({sample['freq']} MHz)  "
+                              f"({band_of(sample['freq'])} GHz)  "
                               f"rssi {sample['rssi']} dBm  "
                               f"retry {retry_s}  beacons {beac_s}  "
                               f"router {gw_s}  internet {inet_s}  "
@@ -1180,6 +1259,7 @@ def headless(mon, seconds, report_every=15):
                 return fmt.format(v) if v is not None else "--"
             print(f"[{sample['ts'].strftime('%H:%M:%S')}] "
                   f"conn={int(sample['connected'])} "
+                  f"node={sample['node'] or '--'} "
                   f"rssi={f(sample['rssi'])} "
                   f"tx={f(sample['txrate'])} "
                   f"retry={f(sample['retry'], '{:.0f}%')} "
