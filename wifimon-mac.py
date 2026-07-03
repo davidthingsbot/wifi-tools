@@ -6,11 +6,17 @@ Same idea, same screen, same CSV files (wifianalyze.py reads them
 unchanged): watch the radio, the air, and the actual internet at 1 Hz,
 so when a device drops off Wi-Fi you can see which layer failed.
 
+Has everything the Linux version grew: router/internet ping charts, own
+`traffic` chart, and mesh-node identification (which AP you're on: #1,
+#2, ...) shown in the status line and roam events.
+
 macOS differences vs the Linux version:
   * noise floor IS available (Mac radios report it) — real `noise` chart
   * retry%/beacon% are NOT available (Apple exposes no station counters);
     the `rate` chart (negotiated tx rate) stands in — rate collapse at
     steady signal means the radio is drowning in retries
+  * mesh-node names need a real BSSID, so they require Location Services
+    granted to the terminal (else macOS redacts BSSIDs — see --doctor)
   * scans are slower and, without permissions, network names/BSSIDs may
     be hidden by macOS privacy rules (run --doctor for guidance)
 
@@ -340,6 +346,47 @@ class MacScanner(threading.Thread):
             return dict(self.aps), self.last_scan, fresh
 
 
+# ---------------------------------------------------------------- traffic
+
+
+class MacTraffic:
+    """1 Hz own-throughput from `netstat -ibn` (macOS has no /sys). Reads
+    the interface's <Link> row (cumulative byte counters) and reports the
+    per-second delta in Mb/s, same as the Linux TrafficPoller."""
+
+    def __init__(self, iface):
+        self.iface = iface
+        self._prev = None               # (time, rx_bytes, tx_bytes)
+
+    def _read(self):
+        out = base.run(["netstat", "-ibn"], timeout=5)
+        for line in out.splitlines():
+            f = line.split()
+            # the <Link#n> row carries the true totals; columns are
+            # Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes
+            if (len(f) >= 10 and f[0] == self.iface
+                    and f[2].startswith("<Link")):
+                try:
+                    return int(f[6]), int(f[9])
+                except ValueError:
+                    return None
+        return None
+
+    def poll(self):
+        cur = self._read()
+        now = time.time()
+        prev = self._prev
+        self._prev = (now, cur[0], cur[1]) if cur else None
+        if cur is None or prev is None or prev[1] is None:
+            return {}
+        dt = now - prev[0]
+        drx, dtx = cur[0] - prev[1], cur[1] - prev[2]
+        if dt <= 0 or drx < 0 or dtx < 0:
+            return {}
+        return {"rx_mbps": round(drx * 8 / dt / 1e6, 2),
+                "tx_mbps": round(dtx * 8 / dt / 1e6, 2)}
+
+
 # ---------------------------------------------------------------- monitor
 
 
@@ -355,6 +402,8 @@ class MacMonitor:
                                   self.link.cw)
         self.ping_gw = base.Pinger()
         self.ping_inet = base.Pinger(base.INET_TARGET)
+        self.traffic = MacTraffic(iface)
+        self.nodemap = base.NodeMap()
         self.logs = base.CsvLogs(logdir)
         self.history = collections.deque(maxlen=base.HISTORY_SECONDS)
         self.events = collections.deque(maxlen=400)
@@ -402,23 +451,37 @@ class MacMonitor:
         self._inet_bad = self._inet_bad + 1 if inet_loss else 0
         self._lag_high = self._lag_high + 1 if (
             inet_ms is not None and inet_ms > base.LAG_EVENT_MS) else 0
+        tput = self.traffic.poll()
+        rx_mbps, tx_mbps = tput.get("rx_mbps"), tput.get("tx_mbps")
+
+        # ---- mesh node identity (needs a real, un-redacted BSSID)
+        if link.get("connected"):
+            self.nodemap.register(link.get("bssid"), link.get("ssid"))
+
+        def node_of(lnk):
+            return self.nodemap.label(lnk.get("bssid")) or "?"
 
         # ---- events
         was = self.prev
         if was:
             if was.get("connected") and not link["connected"]:
                 self.event(base.EVT_DISCONNECT,
-                           f"lost {was.get('ssid')} ({was.get('bssid')})")
+                           f"lost {was.get('ssid')} {node_of(was)} "
+                           f"({was.get('bssid')})")
             elif not was.get("connected") and link["connected"]:
                 self.event(base.EVT_RECONNECT,
-                           f"{link.get('ssid')} ch "
+                           f"{link.get('ssid')} {node_of(link)} ch "
                            f"{base.freq_to_channel(link.get('freq', 0))}")
             elif (link.get("connected")
                   and was.get("bssid") not in (None, "?")
                   and link.get("bssid") not in (None, "?")
                   and link.get("bssid") != was.get("bssid")):
                 self.event(base.EVT_ROAM,
-                           f"{was.get('bssid')} -> {link.get('bssid')}")
+                           f"{node_of(was)} ch "
+                           f"{base.freq_to_channel(was.get('freq', 0))} -> "
+                           f"{node_of(link)} ch "
+                           f"{base.freq_to_channel(link.get('freq', 0))} "
+                           f"({was.get('bssid')} -> {link.get('bssid')})")
         if link.get("rssi") is not None:
             self.rssi_window.append(link["rssi"])
             if (len(self.rssi_window) == self.rssi_window.maxlen
@@ -460,6 +523,11 @@ class MacMonitor:
 
         # ---- scans + AP-lost debounce (same as Linux)
         aps, last_scan, fresh = self.scanner.snapshot()
+        if fresh and link.get("ssid"):
+            # every AP broadcasting our SSID (with a real BSSID) is a node
+            for ap in aps.values():
+                if ap["ssid"] == link["ssid"]:
+                    self.nodemap.register(ap["bssid"], link["ssid"])
         if fresh:
             for key, ap in aps.items():
                 self.logs.scan_w.writerow([now.isoformat(timespec="seconds"),
@@ -483,11 +551,16 @@ class MacMonitor:
         # ---- history + CSV (same columns as Linux; retry/beacon empty)
         sample = {
             "ts": now, "connected": link.get("connected", False),
+            "node": (self.nodemap.label(link.get("bssid"))
+                     if link.get("connected") else None),
             "rssi": link.get("rssi"), "noise": noise, "busy": None,
             "retry": None, "beacon": None,
             "txrate": link.get("txrate"),
             "gw_ms": gw_ms, "inet_ms": inet_ms,
             "gw_loss": gw_loss, "inet_loss": inet_loss,
+            "rx_mbps": rx_mbps, "tx_mbps": tx_mbps,
+            "mbps": (rx_mbps + tx_mbps
+                     if rx_mbps is not None and tx_mbps is not None else None),
             "ssid": link.get("ssid"), "bssid": link.get("bssid"),
             "freq": link.get("freq"),
             "event": self.events[-1][1] if self.events and
@@ -505,7 +578,7 @@ class MacMonitor:
             "", "", "", "",
             nz(noise), "",
             nz(gw_ms), nz(inet_ms), int(gw_loss), int(inet_loss),
-            "", ""])
+            nz(rx_mbps), nz(tx_mbps)])
         self.logs.flush()
         self.prev = link
         return sample, (self.known_aps or aps), last_scan
@@ -628,10 +701,13 @@ def draw_timeline_mac(win, history, color_map):
         (1, lambda y, r: base.draw_chart(
             win, y, r, samples, lambda s: s.get("inet_ms"),
             0, 500, color_map["lag"], "internet", "ms", bad=bad_inet)),
+        (4, lambda y, r: base.draw_chart(
+            win, y, r, samples, lambda s: s.get("mbps"),
+            0, 30, color_map["rssi"], "traffic", "Mb")),
         (3, lambda y, r: base.draw_chart(
             win, y, r, samples, lambda s: s.get("txrate"),
             0, RATE_MAX, color_map["busy"], "rate", "Mb")),
-        (4, lambda y, r: base.draw_chart(
+        (5, lambda y, r: base.draw_chart(
             win, y, r, samples, lambda s: s.get("noise"),
             base.NOISE_MIN, base.NOISE_MAX, color_map["noise"],
             "noise", "")),
@@ -707,14 +783,18 @@ def main_screen(stdscr, mon, args):
                             f(sample["gw_ms"], "{:.0f}ms"))
                     inet_s = ("LOST" if sample["inet_loss"] else
                               f(sample["inet_ms"], "{:.0f}ms"))
-                    status = (f" {mon.iface}  {sample['ssid']}  "
+                    traf_s = (f"↓{sample['rx_mbps']:.1f} ↑{sample['tx_mbps']:.1f}"
+                              if sample["rx_mbps"] is not None else "?")
+                    node_s = f" {sample['node']}" if sample["node"] else ""
+                    status = (f" {mon.iface}  {sample['ssid']}{node_s}  "
                               f"ch {base.freq_to_channel(sample['freq'])}  "
                               f"rssi {f(sample['rssi'])} dBm  "
                               f"noise {f(sample['noise'])} dBm  "
                               f"tx {f(sample['txrate'], '{:.0f}')} Mb/s  "
-                              f"router {gw_s}  internet {inet_s}")
+                              f"router {gw_s}  internet {inet_s}  "
+                              f"{traf_s} Mb/s")
                     if mon.link.redacted:
-                        status += "  [names hidden: see --doctor]"
+                        status += "  [names/node hidden: see --doctor]"
                 else:
                     status = f" {mon.iface}  NOT CONNECTED"
                 age = time.time() - last_scan if last_scan else None
@@ -766,10 +846,12 @@ def headless(mon, seconds, report_every=15):
                 return fmt.format(v) if v is not None else "--"
             print(f"[{sample['ts'].strftime('%H:%M:%S')}] "
                   f"conn={int(sample['connected'])} "
+                  f"node={sample['node'] or '--'} "
                   f"rssi={f(sample['rssi'])} noise={f(sample['noise'])} "
                   f"tx={f(sample['txrate'], '{:.0f}')} "
                   f"router={'LOST' if sample['gw_loss'] else f(sample['gw_ms'], '{:.0f}ms')} "
                   f"internet={'LOST' if sample['inet_loss'] else f(sample['inet_ms'], '{:.0f}ms')} "
+                  f"traffic={f(sample['mbps'], '{:.1f}Mb')} "
                   f"aps={len(aps)} events={len(mon.events)}", flush=True)
         time.sleep(max(0.0, 1.0 - (time.time() - t0)))
     print(f"done: {n} samples, {len(mon.events)} events")

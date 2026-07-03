@@ -120,7 +120,10 @@ python3 wifimon-mac.py --track "Name"   # fox hunt by network name or BSSID
 python3 wifimon-mac.py --debug-once     # one text sample to send back
 ```
 
-Differences from the Linux version:
+It has feature parity with the Linux version — `router`/`internet` ping
+charts, the own-`traffic` chart, and **mesh-node identification** (which
+AP you're on, `#1`/`#2`, in the status line and roam events) all work.
+Differences are only where macOS forces them:
 
 - **`noise` chart is real** — Mac radios report the noise floor, which
   Intel laptop radios don't. A nearby non-Wi-Fi transmitter shows up
@@ -129,10 +132,14 @@ Differences from the Linux version:
   `rate` chart (negotiated tx rate) stands in: rate collapsing while
   rssi holds steady means the radio is drowning in retries, and a
   RATE COLLAPSE event fires.
-- **`router`/`internet` ping charts: identical.** So are the CSVs —
-  `wifianalyze.py` reads Mac captures unchanged (its suspects table
-  automatically uses gateway RTT as the bad-air metric when retry% is
-  absent).
+- **`traffic` chart** — own throughput from `netstat -ibn` (macOS has
+  no `/sys`), same 0–30 Mb/s chart as Linux.
+- **Mesh node names need a real BSSID**, so they require Location
+  Services granted to the terminal — otherwise macOS redacts BSSIDs and
+  the node shows as `?`. `--doctor` explains the one-time grant.
+- **CSVs are identical**, so `wifianalyze.py` reads Mac captures
+  unchanged (its suspects table automatically uses gateway RTT as the
+  bad-air metric when retry% is absent).
 - Scans are slower (macOS throttles them) and may show names as
   `<hidden>` until Location Services is granted — `--doctor` explains.
 
