@@ -284,6 +284,11 @@ class MacScanner(threading.Thread):
 
     def _scan_once(self):
         aps = {}
+        # when macOS redacts BSSIDs, APs are keyed by SSID~channel — and a
+        # mesh (several nodes, same SSID, same channel) would collapse to
+        # one entry. Suffix duplicates #2, #3... so every node stays
+        # visible. (Field fix from the Mac in the house.)
+        seen_keys = collections.Counter()
         now = time.time()
         if self.cw is not None:
             try:
@@ -297,7 +302,11 @@ class MacScanner(threading.Thread):
                     band = {1: "2.4", 2: "5", 3: "6"}.get(chan.channelBand(),
                                                           "5")
                     freq = synth_freq(chan.channelNumber(), band)
-                    key = bssid or f"{ssid or '<hidden>'}~ch{chan.channelNumber()}"
+                    base_key = (bssid or
+                                f"{ssid or '<hidden>'}~ch{chan.channelNumber()}")
+                    seen_keys[base_key] += 1
+                    key = (base_key if seen_keys[base_key] == 1
+                           else f"{base_key}#{seen_keys[base_key]}")
                     aps[key] = {"bssid": key, "ssid": ssid or "<hidden>",
                                 "freq": freq, "signal": float(n.rssiValue()),
                                 "seen": now}
@@ -310,7 +319,10 @@ class MacScanner(threading.Thread):
             if others and now - updated < 90:
                 self.mode = "profiler"
                 for ap in others:
-                    key = f"{ap['ssid']}~ch{ap['chan']}"
+                    base_key = f"{ap['ssid']}~ch{ap['chan']}"
+                    seen_keys[base_key] += 1
+                    key = (base_key if seen_keys[base_key] == 1
+                           else f"{base_key}#{seen_keys[base_key]}")
                     aps[key] = {"bssid": key, "ssid": ap["ssid"],
                                 "freq": ap["freq"], "signal": ap["signal"],
                                 "seen": updated}
