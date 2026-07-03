@@ -13,7 +13,13 @@ receiver, type, size, retry flag, data rate, per-frame RSSI. What it
 CANNOT see: frame contents (WPA2/WPA3 encrypts the payload) — which does
 not matter for congestion diagnosis.
 
-Four things to know:
+Five things to know:
+  * NOT ALL CARDS CAN DO THIS. Monitor mode has to be supported by the
+    driver, and Intel iwlwifi cards (very common in laptops) usually
+    can NOT deliver monitor frames even though they advertise the mode.
+    The tool checks up front and, if it captures nothing, tells you so
+    and points you at a cheap USB adapter that works. It is not a bug in
+    the tool — it is the radio.
   * monitor mode DROPS this machine's Wi-Fi connection while running
     (a single radio can't be associated and sniffing at once). Run it in
     bursts; the connection restores on exit.
@@ -263,15 +269,33 @@ def chan_to_freq(ch):
     return 5000 + 5 * ch
 
 
+def phy_supports_monitor_combo():
+    """True if the card lists 'monitor' in a valid interface combination.
+    Many Intel iwlwifi cards advertise monitor as a *mode* but omit it from
+    every *combination* — meaning it won't actually deliver frames."""
+    ok, out = sh(["iw", "phy"])
+    m = re.search(r"valid interface combinations:(.+?)(?:\n\t[A-Z]|\Z)",
+                  out, re.S)
+    return bool(m and "monitor" in m.group(1))
+
+
 class MonitorMode:
     """Context manager: put the interface into monitor mode on a channel,
-    restore managed mode (and let NetworkManager reconnect) on exit."""
+    restore managed mode (and let NetworkManager reconnect) on exit.
+
+    Tells NetworkManager to stop managing the interface first — otherwise
+    NM reclaims it mid-capture and silently reverts it to managed."""
 
     def __init__(self, iface, channel):
         self.iface = iface
         self.channel = channel
+        self._nm_released = False
 
     def __enter__(self):
+        # stop NetworkManager fighting us for the interface
+        if shutil.which("nmcli"):
+            ok, _ = sh(["nmcli", "device", "set", self.iface, "managed", "no"])
+            self._nm_released = ok
         steps = [
             ["ip", "link", "set", self.iface, "down"],
             ["iw", "dev", self.iface, "set", "type", "monitor"],
@@ -283,6 +307,16 @@ class MonitorMode:
             if not ok:
                 self.__exit__(None, None, None)
                 raise RuntimeError(f"failed: {' '.join(cmd)}\n{out.strip()}")
+        # verify the switch actually took — Intel cards can silently ignore it
+        ok, info = sh(["iw", "dev", self.iface, "info"])
+        if "type monitor" not in info:
+            self.__exit__(None, None, None)
+            raise RuntimeError(
+                f"{self.iface} did not enter monitor mode (still: "
+                f"{'managed' if 'type managed' in info else 'unknown'}).\n"
+                "This card's driver likely does not support usable monitor "
+                "mode — very common on Intel iwlwifi. See the note the tool "
+                "prints on exit for a USB-adapter fix.")
         return self
 
     def __exit__(self, *exc):
@@ -290,6 +324,8 @@ class MonitorMode:
                     ["iw", "dev", self.iface, "set", "type", "managed"],
                     ["ip", "link", "set", self.iface, "up"]):
             sh(cmd)
+        if self._nm_released:
+            sh(["nmcli", "device", "set", self.iface, "managed", "yes"])
         # nudge NetworkManager to reconnect if it's around
         sh(["nmcli", "device", "connect", self.iface])
 
@@ -318,7 +354,8 @@ class Census:
     def __init__(self):
         self.stations = {}
         self.total_air_us = 0.0
-        self.total_frames = 0
+        self.total_frames = 0        # frames that parsed
+        self.raw_frames = 0          # frames the socket delivered at all
         self.bad_fcs = 0
         self.start = time.time()
 
@@ -360,6 +397,7 @@ def capture_loop(sock, census, stop):
         except OSError:
             break
         now = time.time()
+        census.raw_frames += 1
         rt_len, rt = parse_radiotap(buf)
         if rt_len is None:
             continue
@@ -519,7 +557,14 @@ def main():
                              "retries", "bytes", "rssi", "mgmt", "ctrl",
                              "data", "bssid"])
 
+    if not phy_supports_monitor_combo():
+        print("WARNING: this card does not list 'monitor' in any valid "
+              "interface\ncombination (typical of Intel iwlwifi). Monitor "
+              "mode will likely\ncapture nothing. Trying anyway — see the "
+              "note below if it fails.\n")
+
     mon = None
+    no_frames = False
     try:
         mon = MonitorMode(iface, args.channel)
         mon.__enter__()
@@ -534,6 +579,17 @@ def main():
                                args=(sock, census, stop), daemon=True)
         cap.start()
 
+        # preflight: real air on this channel delivers frames within a
+        # second or two. If nothing arrives, the card isn't truly sniffing
+        # (the usual Intel iwlwifi story) — say so instead of sitting mute.
+        print("listening for frames (preflight)...")
+        t_pre = time.time()
+        while time.time() - t_pre < 6 and census.raw_frames == 0:
+            time.sleep(0.3)
+        if census.raw_frames == 0:
+            stop[0] = True
+            raise RuntimeError("NO_FRAMES")
+
         deadline = time.time() + args.seconds if args.seconds else None
         try:
             curses.wrapper(run_ui, census, iface, args.channel, oui,
@@ -541,15 +597,38 @@ def main():
         except KeyboardInterrupt:
             pass
         stop[0] = True
+    except RuntimeError as e:
+        if str(e) == "NO_FRAMES":
+            no_frames = True
+        else:
+            print(f"\nsetup failed: {e}")
     finally:
         if mon and not args.no_restore:
             mon.__exit__(None, None, None)
         if csv_file:
             csv_file.close()
 
+    if no_frames or (census.raw_frames == 0 and mon):
+        print("\n" + "=" * 66)
+        print("NO FRAMES CAPTURED. The interface was put into monitor mode "
+              "but the\ndriver delivered zero frames — so this card can't "
+              "actually sniff.")
+        print("This is the norm on Intel iwlwifi cards (yours included).")
+        print("\nThe reliable fix is a cheap USB Wi-Fi adapter with a "
+              "monitor-capable\nchipset, e.g.:")
+        print("  * Alfa AWUS036ACM  (MediaTek MT7612U, 2.4+5 GHz)  ~$30")
+        print("  * Alfa AWUS036NHA  (Atheros AR9271, 2.4 GHz only)  ~$15")
+        print("Plug it in, find its name with `iw dev`, and run:")
+        print(f"  sudo ./wificensus.py --iface <usbwlan> --channel {args.channel}")
+        print("\nMeanwhile wifimon.py + wifianalyze.py (this laptop's own "
+              "link) work\nfine and already told us a lot.")
+        print("=" * 66)
+        return
+
     # final text summary
     elapsed = max(1e-3, time.time() - census.start)
-    print(f"\ncaptured {census.total_frames} frames from "
+    print(f"\ncaptured {census.total_frames} frames "
+          f"({census.raw_frames} raw) from "
           f"{len(census.stations)} devices in {elapsed:.0f}s "
           f"(channel ~{100 * census.total_air_us / 1e6 / elapsed:.0f}% busy)")
     top = sorted(census.stations.values(), key=lambda s: s.air_us,

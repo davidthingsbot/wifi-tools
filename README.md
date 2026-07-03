@@ -173,8 +173,15 @@ sudo ./wificensus.py --channel 149 --seconds 60 # 5 GHz, auto-stop
 Keys: `q` quit, `s` cycle sort (airtime / frames / retries / signal).
 Sorted by airtime by default; devices over 20% airtime turn red (hogs).
 
-**Four things to know before running it:**
+**Five things to know before running it:**
 
+0. **Your card may not be able to do this at all.** Monitor mode must be
+   supported by the Wi-Fi driver, and **Intel `iwlwifi` cards (common in
+   laptops) usually can't deliver monitor frames** even though `iw`
+   lists the mode. The tool checks the card's interface combinations up
+   front, and if it captures nothing it tells you plainly and points you
+   at a cheap USB adapter (Alfa AWUS036ACM ~$30, or AWUS036NHA ~$15)
+   that does monitor mode reliably. This is a hardware limit, not a bug.
 1. **It drops this machine's Wi-Fi** while running — a single radio can't
    be associated and sniffing at once. The connection restores on exit
    (so don't run it over SSH-over-Wi-Fi). Run it in bursts.
