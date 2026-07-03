@@ -13,7 +13,7 @@ Panels:
   * 5 GHz spectrum    — same for the 5 GHz band
   * Timeline (large)  — last N minutes, 1 column = 1 second:
         rssi    our link signal (dBm); red x = disconnected. Bars are
-                tinted by band (2.4=yellow, 5=cyan, 6=magenta) to match
+                tinted by band (2.4=orange, 5=blue, 6=purple) to match
                 the band/chan lane, so a roam recolors the signal too.
         band/chan  which band + channel we're on; the label is written
                 at each change (a few seconds) then a continuation rule
@@ -822,12 +822,35 @@ GUTTER = 15                             # left axis gutter width
 RIGHT = 7                               # right current-value column
 
 
+def init_band_colors(base_pair=10):
+    """Allocate vivid, distinct per-band color pairs and return {band: attr}.
+    Deliberately avoids the washed-out terminal defaults (green, cyan,
+    yellow, magenta): uses 256-color orange / blue / purple when the
+    terminal supports it, else bold basic red / blue / white."""
+    if not curses.has_colors():
+        return {}
+    if curses.COLORS >= 256:
+        spec = {"2.4": 208, "5": 33, "6": 129}      # orange, blue, purple
+        extra = 0
+    else:
+        spec = {"2.4": curses.COLOR_RED, "5": curses.COLOR_BLUE,
+                "6": curses.COLOR_WHITE}
+        extra = curses.A_BOLD
+    out = {}
+    for i, (b, col) in enumerate(spec.items()):
+        try:
+            curses.init_pair(base_pair + i, col, -1)
+            out[b] = curses.color_pair(base_pair + i) | extra
+        except curses.error:
+            pass
+    return out
+
+
 def band_color(freq, color_map):
-    """Per-band color, matching the band/channel lane:
-    2.4 = yellow, 5 = cyan, 6 = magenta. None if unknown."""
+    """Per-band color (from init_band_colors), matching the band/channel
+    lane. None if unknown or colors unavailable."""
     b = band_of(freq) if freq else None
-    return {"2.4": color_map["busy"], "5": color_map["lag"],
-            "6": color_map["noise"]}.get(b)
+    return color_map.get("band", {}).get(b)
 
 
 def draw_chart(win, y0, rows, samples, getter, lo, hi, attr,
@@ -1067,7 +1090,7 @@ def main_screen(stdscr, mon, args):
         curses.init_pair(5, curses.COLOR_MAGENTA, -1) # noise / beacons
     cp = (lambda n: curses.color_pair(n)) if has_color else (lambda n: 0)
     color_map = {"rssi": cp(1), "noise": cp(5), "busy": cp(3),
-                 "event": cp(4), "lag": cp(2)}
+                 "event": cp(4), "lag": cp(2), "band": init_band_colors()}
 
     paused = False
     chans_24 = list(range(1, 14))

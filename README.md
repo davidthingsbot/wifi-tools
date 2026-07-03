@@ -47,8 +47,9 @@ Panels:
   strongest signal, bottom row = AP count per channel (yellow when crowded).
 - **Timeline** (the main panel) — last N minutes, one column per second:
   - `rssi` — our link signal; red `x` = disconnected. The bars are
-    tinted by band (2.4=yellow, 5=cyan, 6=magenta) to match the lane
-    below, so when a roam changes band the signal chart recolors too.
+    tinted by band (2.4=orange, 5=blue, 6=purple — vivid, distinct
+    colors) to match the lane below, so when a roam changes band the
+    signal chart recolors too.
   - `band`/`chan` — which band and channel we're on. At each change the
     band (`2.4`/`5`/`6`) and channel are written out (a few columns =
     a few seconds) then a continuation rule runs until the next change,

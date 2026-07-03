@@ -762,7 +762,8 @@ def main_screen(stdscr, mon, args):
         curses.init_pair(5, curses.COLOR_MAGENTA, -1)
     cp = (lambda n: curses.color_pair(n)) if has_color else (lambda n: 0)
     color_map = {"rssi": cp(1), "noise": cp(5), "busy": cp(3),
-                 "event": cp(4), "lag": cp(2)}
+                 "event": cp(4), "lag": cp(2),
+                 "band": base.init_band_colors()}
     paused = False
     chans_24 = list(range(1, 14))
     chans_5 = [36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120,
