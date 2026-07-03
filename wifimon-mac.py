@@ -726,7 +726,8 @@ def draw_timeline_mac(win, history, color_map):
     y = 1
     base.draw_chart(win, y, rows_rssi, samples, lambda s: s["rssi"],
                     base.RSSI_MIN, base.RSSI_MAX, color_map["rssi"],
-                    "rssi", "", disconnect_attr=color_map["event"])
+                    "rssi", "", disconnect_attr=color_map["event"],
+                    attr_of=lambda s: base.band_color(s.get("freq"), color_map))
     y += rows_rssi
     if rows_lane:
         base.draw_band_channel(win, y, rows_lane, samples, color_map)

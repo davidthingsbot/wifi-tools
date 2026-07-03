@@ -12,11 +12,13 @@ Panels:
                         bottom row = AP count per channel
   * 5 GHz spectrum    — same for the 5 GHz band
   * Timeline (large)  — last N minutes, 1 column = 1 second:
-        rssi    our link signal (dBm); red x = disconnected
+        rssi    our link signal (dBm); red x = disconnected. Bars are
+                tinted by band (2.4=yellow, 5=cyan, 6=magenta) to match
+                the band/chan lane, so a roam recolors the signal too.
         band/chan  which band + channel we're on; the label is written
                 at each change (a few seconds) then a continuation rule
                 runs until the next change — makes band/channel hops
-                (mesh roaming) obvious. Colored per band.
+                (mesh roaming) obvious. Same per-band colors.
         router   RTT of a 1 Hz ping to the router — the Wi-Fi hop in
                  isolation; red ✕ = router unreachable while associated
                  (the "bars lie" moment)
@@ -820,14 +822,25 @@ GUTTER = 15                             # left axis gutter width
 RIGHT = 7                               # right current-value column
 
 
+def band_color(freq, color_map):
+    """Per-band color, matching the band/channel lane:
+    2.4 = yellow, 5 = cyan, 6 = magenta. None if unknown."""
+    b = band_of(freq) if freq else None
+    return {"2.4": color_map["busy"], "5": color_map["lag"],
+            "6": color_map["noise"]}.get(b)
+
+
 def draw_chart(win, y0, rows, samples, getter, lo, hi, attr,
-               label, unit, disconnect_attr=None, bad=None):
+               label, unit, disconnect_attr=None, bad=None, attr_of=None):
     """A multi-row column chart: one terminal column per sample.
 
     bad: optional callable(sample) -> None when the second was fine, or a
     curses attr to draw a full-height ✕ column marker in (so different
     failure causes can get different colors). Visually distinct from
     "no data" (blank).
+    attr_of: optional callable(sample) -> attr to color each column
+    individually (falling back to `attr` when it returns None); used to
+    tint the RSSI bars by band.
     """
     h, w = win.getmaxyx()
     x0 = GUTTER
@@ -864,15 +877,16 @@ def draw_chart(win, y0, rows, samples, getter, lo, hi, attr,
         if v is None:
             continue
         last_val = v
+        a = (attr_of(s) or attr) if attr_of else attr
         lvl = scale(v, lo, hi, rows * 8)
         full, part = divmod(lvl, 8)
         try:
             for r in range(full):
-                win.addstr(y0 + rows - 1 - r, x, "█", attr)
+                win.addstr(y0 + rows - 1 - r, x, "█", a)
             if part:
-                win.addstr(y0 + rows - 1 - full, x, BAR[part - 1], attr)
+                win.addstr(y0 + rows - 1 - full, x, BAR[part - 1], a)
             elif full == 0:
-                win.addstr(y0 + rows - 1, x, "▁", attr | curses.A_DIM)
+                win.addstr(y0 + rows - 1, x, "▁", a | curses.A_DIM)
         except curses.error:
             pass
     if last_val is not None:
@@ -891,9 +905,6 @@ def draw_band_channel(win, y0, rows, samples, color_map):
       row0  band  (2.4 / 5 / 6), written at each change
       row1  channel number, then a continuation rule until the next change
     """
-    band_attr = {"2.4": color_map["busy"],    # yellow — the crowded band
-                 "5": color_map["lag"],        # cyan
-                 "6": color_map["noise"]}      # magenta
     win.addnstr(y0, 0, "band".rjust(GUTTER - 2) + " │", GUTTER, curses.A_DIM)
     win.addnstr(y0 + 1, 0, "chan".rjust(GUTTER - 2) + " │", GUTTER,
                 curses.A_DIM)
@@ -918,7 +929,7 @@ def draw_band_channel(win, y0, rows, samples, color_map):
             prev = None
             continue
         band, chan = k
-        attr = band_attr.get(band, 0)
+        attr = band_color(s["freq"], color_map) or 0
         if k != prev:                    # segment start: write both labels
             for j, c in enumerate(band):
                 put(y0, x + j, c, attr | curses.A_BOLD)
@@ -1005,7 +1016,8 @@ def draw_timeline(win, history, color_map):
     y = 1
     draw_chart(win, y, rows_rssi, samples, lambda s: s["rssi"],
                RSSI_MIN, RSSI_MAX, color_map["rssi"], "rssi", "",
-               disconnect_attr=color_map["event"])
+               disconnect_attr=color_map["event"],
+               attr_of=lambda s: band_color(s.get("freq"), color_map))
     y += rows_rssi
     if rows_lane:
         draw_band_channel(win, y, rows_lane, samples, color_map)
