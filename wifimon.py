@@ -884,13 +884,12 @@ def draw_chart(win, y0, rows, samples, getter, lo, hi, attr,
 
 
 def draw_band_channel(win, y0, rows, samples, color_map):
-    """A band/channel track: at each change the band and channel are
-    written out (a few columns each = a few seconds), then a continuation
-    rule runs until the next change. Colored per band. Uses 4 rows:
-      row0  band  (2.4 / 5 / 6)
-      row1  channel number
-      row2  continuation rule (├───────) colored by band
-      row3  breathing space / separator
+    """A band/channel track in two rows: at each change the band is
+    written on the top row and the channel on the bottom row; the bottom
+    row then continues with a rule (───) until the next change. Colored
+    per band, so band/channel hops (mesh roaming) pop out at a glance.
+      row0  band  (2.4 / 5 / 6), written at each change
+      row1  channel number, then a continuation rule until the next change
     """
     band_attr = {"2.4": color_map["busy"],    # yellow — the crowded band
                  "5": color_map["lag"],        # cyan
@@ -898,8 +897,6 @@ def draw_band_channel(win, y0, rows, samples, color_map):
     win.addnstr(y0, 0, "band".rjust(GUTTER - 2) + " │", GUTTER, curses.A_DIM)
     win.addnstr(y0 + 1, 0, "chan".rjust(GUTTER - 2) + " │", GUTTER,
                 curses.A_DIM)
-    if rows >= 3:
-        win.addnstr(y0 + 2, GUTTER - 2, " │", 2, curses.A_DIM)
 
     def keyof(s):
         if not s["connected"] or not s.get("freq"):
@@ -913,6 +910,7 @@ def draw_band_channel(win, y0, rows, samples, color_map):
             pass
 
     prev = None
+    label_end = 0                        # column past the current channel label
     for i, s in enumerate(samples):
         x = GUTTER + i
         k = keyof(s)
@@ -921,15 +919,15 @@ def draw_band_channel(win, y0, rows, samples, color_map):
             continue
         band, chan = k
         attr = band_attr.get(band, 0)
-        if k != prev:                    # segment start: label + tick
+        if k != prev:                    # segment start: write both labels
             for j, c in enumerate(band):
                 put(y0, x + j, c, attr | curses.A_BOLD)
-            for j, c in enumerate(str(chan)):
+            cs = str(chan)
+            for j, c in enumerate(cs):
                 put(y0 + 1, x + j, c, attr | curses.A_BOLD)
-            if rows >= 3:
-                put(y0 + 2, x, "├", attr)
-        elif rows >= 3:                  # continuation rule
-            put(y0 + 2, x, "─", attr)
+            label_end = x + len(cs)
+        elif x >= label_end:             # continuation rule past the label
+            put(y0 + 1, x, "─", attr)
         prev = k
 
 
@@ -995,7 +993,7 @@ def draw_timeline(win, history, color_map):
     ]
     # rssi + a 4-row band/channel lane share the top ~30%; the lane is
     # carved out of rssi's height (only when there's room to spare)
-    LANE = 4
+    LANE = 2
     rows_top = max(3, int(avail * 0.3))
     rows_lane = LANE if rows_top >= 3 + LANE else 0
     rows_rssi = rows_top - rows_lane

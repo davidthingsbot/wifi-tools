@@ -714,7 +714,7 @@ def draw_timeline_mac(win, history, color_map):
     ]
     # rssi + a 4-row band/channel lane share the top; the lane is carved
     # out of rssi's height (only when there's room to spare)
-    LANE = 4
+    LANE = 2
     rows_top = max(3, int(avail * 0.3))
     rows_lane = LANE if rows_top >= 3 + LANE else 0
     rows_rssi = rows_top - rows_lane
