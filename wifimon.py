@@ -28,7 +28,10 @@ Panels:
         traffic  our own throughput (rx+tx Mb/s) — if latency/retries
                  climb with it, congestion is self-inflicted; if they're
                  bad while it's flat, blame the air
-        retry%   tx retransmission rate — high = hostile air / contention
+        retry%   tx retransmission rate — high = hostile air / contention.
+                 An alarm-red ✕ marks a second where a frame was dropped
+                 for good (tx_failed): the line between "busy air we're
+                 winning" (retries, delivered late) and "the air beat us"
         beac%    beacon delivery rate — low = we're missing AP beacons
         busy%/noise shown instead when the driver provides survey data
   * Event log         — timestamped anomalies
@@ -724,6 +727,7 @@ class Monitor:
                      if link.get("connected") else None),
             "rssi": link.get("rssi"), "noise": noise, "busy": busy,
             "retry": retry, "beacon": beacon,
+            "tx_failed": stat.get("tx_failed"),
             "gw_ms": gw_ms, "inet_ms": inet_ms,
             "gw_loss": gw_loss, "inet_loss": inet_loss,
             "rx_mbps": rx_mbps, "tx_mbps": tx_mbps,
@@ -1014,6 +1018,15 @@ def draw_timeline(win, history, color_map, multi_node=None):
             return color_map["noise"]
         return None
 
+    # tx_failed is the line between "busy air we're winning" and "the air
+    # beat us": tx retries are frames that got through after a resend (high
+    # retry% just costs airtime), tx_failed is frames the radio gave up on
+    # entirely. Overlaid on the retry% lane as an alarm-red ✕ so a genuine
+    # delivery failure jumps out of an otherwise-survivable retry storm.
+    def bad_retry(s):
+        f = s.get("tx_failed")
+        return color_map["event"] if f else None
+
     def chart_aux(y, rows):
         if have_busy:
             draw_chart(win, y, rows, samples, lambda s: s["busy"],
@@ -1037,9 +1050,9 @@ def draw_timeline(win, history, color_map, multi_node=None):
         (3, lambda y, r: draw_chart(       # our own load on the air
             win, y, r, samples, lambda s: s.get("mbps"),
             0, 30, color_map["rssi"], "traffic", "Mb")),
-        (2, lambda y, r: draw_chart(
-            win, y, r, samples, lambda s: s.get("retry"),
-            0, 100, color_map["busy"], "retry%", "%")),
+        (2, lambda y, r: draw_chart(       # retries = airtime tax; ✕ = frame
+            win, y, r, samples, lambda s: s.get("retry"),   # actually dropped
+            0, 100, color_map["busy"], "retry%", "%", bad=bad_retry)),
         (5, chart_aux),
     ]
     # rssi + a 4-row band/channel lane share the top ~30%; the lane is
@@ -1136,6 +1149,10 @@ def main_screen(stdscr, mon, args):
                 if sample["connected"]:
                     retry_s = (f"{sample['retry']:.0f}%"
                                if sample["retry"] is not None else "?")
+                    # tx_failed = frames dropped for good (not just resent);
+                    # silent at 0 (the norm), shouts the moment the air wins
+                    if sample.get("tx_failed"):
+                        retry_s += f" FAIL×{sample['tx_failed']}"
                     beac_s = (f"{sample['beacon']:.0f}%"
                               if sample["beacon"] is not None else "?")
                     gw_s = ("LOST" if sample["gw_loss"] else
